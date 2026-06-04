@@ -34,9 +34,44 @@ class DesignAgent:
         self, image_prompt: str, filename: str = "post_image.png"
     ) -> str:
         """Generate a LinkedIn-ready image and save it to disk."""
+        if self._image_provider == "huggingface":
+            return self._generate_image_hf(image_prompt, filename)
         if self._image_provider == "pollinations":
             return self._generate_image_pollinations(image_prompt, filename)
         return self._generate_image_openai(image_prompt, filename)
+
+    def _generate_image_hf(self, image_prompt: str, filename: str) -> str:
+        """
+        Generate via Hugging Face Inference API — free with HF_API_TOKEN.
+        Uses FLUX.1-schnell (state-of-the-art, fast, free on HF free tier).
+        Falls back to Pillow-rendered image on any error.
+        """
+        from config.settings import get_settings
+        settings = get_settings()
+        token = settings.hf_api_token
+        if not token:
+            print("  [WARN] HF_API_TOKEN not set. Falling back to local image.")
+            return self._generate_image_pillow(image_prompt, filename)
+
+        full_prompt = (
+            f"{image_prompt}. Professional, high-quality, suitable for LinkedIn. "
+            "Clean modern composition, vibrant colors, photorealistic or digital art style."
+        )
+        api_url = "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell"
+        headers = {"Authorization": f"Bearer {token}"}
+        payload = {"inputs": full_prompt, "parameters": {"width": 1024, "height": 1024}}
+
+        print("  Generating image with FLUX.1-schnell (Hugging Face)...")
+        try:
+            resp = requests.post(api_url, headers=headers, json=payload, timeout=120)
+            resp.raise_for_status()
+            out_path = self._out / filename
+            out_path.write_bytes(resp.content)
+            print(f"  Image saved: {out_path}")
+            return str(out_path)
+        except Exception as exc:
+            print(f"  [WARN] HuggingFace image generation failed ({exc}). Falling back to local image.")
+            return self._generate_image_pillow(image_prompt, filename)
 
     def _generate_image_openai(
         self, image_prompt: str, filename: str
@@ -83,6 +118,62 @@ class DesignAgent:
         except Exception as exc:
             print(f"  [WARN] Pollinations.ai unavailable ({exc}). Generating branded image locally.")
             return self._generate_image_pillow(image_prompt, filename)
+
+    def add_text_overlay(self, image_path: str, hook_text: str) -> str:
+        """
+        Overlay the hook sentence on the bottom of an AI-generated image.
+        Adds a semi-transparent dark gradient banner with white bold text.
+        Returns the path to the modified image (overwrites in-place).
+        """
+        img = Image.open(image_path).convert("RGBA")
+        W, H = img.size
+
+        # Dark gradient overlay at the bottom third
+        overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        draw_ov = ImageDraw.Draw(overlay)
+
+        banner_h = H // 3
+        for i in range(banner_h):
+            alpha = int(210 * (i / banner_h))          # 0 → 210 (top → bottom)
+            draw_ov.rectangle([(0, H - banner_h + i), (W, H - banner_h + i + 1)],
+                              fill=(10, 36, 66, alpha))
+
+        # LinkedIn blue accent line above the text
+        draw_ov.rectangle([(0, H - banner_h), (W, H - banner_h + 5)],
+                          fill=(0, 119, 181, 220))
+
+        composite = Image.alpha_composite(img, overlay).convert("RGB")
+        draw = ImageDraw.Draw(composite)
+
+        # Word-wrap the hook text
+        font = self._font(min(60, max(36, W // 18)))
+        words = hook_text.split()
+        lines, line = [], []
+        for w in words:
+            trial = " ".join(line + [w])
+            bb = draw.textbbox((0, 0), trial, font=font)
+            if bb[2] - bb[0] > W - 80 and line:
+                lines.append(" ".join(line))
+                line = [w]
+            else:
+                line.append(w)
+        if line:
+            lines.append(" ".join(line))
+
+        line_h = font.size + 12
+        total_text_h = len(lines) * line_h
+        y = H - (banner_h // 2) - (total_text_h // 2)
+
+        for ln in lines:
+            bb = draw.textbbox((0, 0), ln, font=font)
+            x = (W - (bb[2] - bb[0])) // 2
+            # Shadow
+            draw.text((x + 2, y + 2), ln, font=font, fill=(0, 0, 0, 160))
+            draw.text((x, y), ln, font=font, fill=(255, 255, 255))
+            y += line_h
+
+        composite.save(image_path, "PNG")
+        return image_path
 
     def _generate_image_pillow(
         self, image_prompt: str, filename: str
@@ -142,40 +233,92 @@ class DesignAgent:
         topic: str,
         filename: str = "flyer.png",
     ) -> str:
-        """Render a branded flyer card (1200×627 px) using Pillow."""
+        """
+        AI-powered flyer (1200×627):
+          1. FLUX generates a clean abstract background — NO topic words in prompt
+             so no stray text appears in the AI image.
+          2. Pillow draws a solid opaque text panel on the left half.
+          3. Headline phrase + subtitle from the AI content are overlaid cleanly.
+        """
         W, H = 1200, 627
-        BG = (15, 76, 129)        # deep LinkedIn blue
-        ACCENT = (0, 119, 181)    # LinkedIn blue
-        TEAL = (0, 200, 150)
-        WHITE = (255, 255, 255)
-        LIGHT = (200, 220, 240)
 
-        img = Image.new("RGB", (W, H), BG)
-        draw = ImageDraw.Draw(img)
+        # ── Step 1: ABSTRACT background — no topic keywords to avoid text in image ──
+        bg_prompt = (
+            "Abstract professional background, dark navy blue gradient, "
+            "soft bokeh light orbs, subtle geometric lines, cinematic depth of field, "
+            "clean minimal corporate aesthetic, no text, no letters, no words, "
+            "no typography, no logos, no people, 4K quality."
+        )
+        bg_path = self._generate_image_hf(bg_prompt, "_flyer_bg.png")
 
-        # Decorative circles
-        draw.ellipse((-120, -120, 280, 280), fill=ACCENT)
-        draw.ellipse((980, 380, 1380, 780), fill=ACCENT)
+        try:
+            bg = Image.open(bg_path).convert("RGBA").resize((W, H), Image.LANCZOS)
+        except Exception:
+            return self._flyer_pillow_fallback(headline, subtitle, topic, filename)
 
-        # Top and bottom accent bars
-        draw.rectangle([0, 0, W, 8], fill=TEAL)
-        draw.rectangle([0, H - 8, W, H], fill=TEAL)
+        # ── Step 2: Solid text panel on left 52% of image ────────────────────
+        PANEL_W = int(W * 0.52)
+        PANEL_COLOR = (8, 22, 50, 230)          # near-opaque dark navy
 
-        # Topic tag (top-right)
-        tag_font = self._font(22)
-        draw.text((W - 40, 24), f"#{topic.upper()}", font=tag_font, fill=TEAL, anchor="ra")
+        overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        ov_draw = ImageDraw.Draw(overlay)
 
-        # Headline — centred, word-wrapped
-        h_font = self._font(68)
-        y = self._draw_wrapped(draw, headline, h_font, WHITE, W, 60, H // 4)
+        # Solid panel left side
+        ov_draw.rectangle([(0, 0), (PANEL_W, H)], fill=PANEL_COLOR)
 
-        # Subtitle
+        # Soft feather: blend panel edge into the photo over 80px
+        for x in range(80):
+            alpha = int(PANEL_COLOR[3] * (1 - x / 80))
+            ov_draw.rectangle([(PANEL_W + x, 0), (PANEL_W + x + 1, H)],
+                              fill=(8, 22, 50, alpha))
+
+        # LinkedIn blue top stripe + gold bottom stripe
+        ov_draw.rectangle([(0, 0),      (W, 7)], fill=(0, 119, 181, 255))
+        ov_draw.rectangle([(0, H - 7),  (W, H)], fill=(255, 204, 0,  255))
+
+        bg = Image.alpha_composite(bg, overlay)
+        draw = ImageDraw.Draw(bg)
+
+        PAD = 56   # left padding for all text
+
+        # ── Step 3: Topic pill tag ────────────────────────────────────────────
+        tag_font = self._font(18)
+        tag_text = f"#{topic.upper()}"
+        tb = draw.textbbox((0, 0), tag_text, font=tag_font)
+        tag_w = tb[2] - tb[0] + 28
+        draw.rounded_rectangle([(PAD, 30), (PAD + tag_w, 30 + 32)],
+                                radius=16, fill=(0, 119, 181, 255))
+        draw.text((PAD + 14, 34), tag_text, font=tag_font, fill=(255, 255, 255))
+
+        # ── Step 4: Headline (large, bold, white) ─────────────────────────────
+        # Use a key phrase from the headline — strip filler words for impact
+        h_font = self._font(62)
+        y = self._draw_wrapped(draw, headline, h_font, (255, 255, 255),
+                               W, PAD, H // 4 - 10,
+                               max_width=PANEL_W - PAD - 20, align="left",
+                               line_gap=10)
+
+        # Gold accent divider under headline
+        draw.rectangle([(PAD, y + 10), (PAD + 60, y + 14)],
+                       fill=(255, 204, 0, 255))
+        y += 34
+
+        # ── Step 5: Subtitle (medium, light blue) ────────────────────────────
         if subtitle:
-            s_font = self._font(34)
-            self._draw_wrapped(draw, subtitle, s_font, LIGHT, W, 60, y + 24)
+            s_font = self._font(26)
+            y = self._draw_wrapped(draw, subtitle, s_font, (180, 215, 245),
+                                   W, PAD, y,
+                                   max_width=PANEL_W - PAD - 20, align="left",
+                                   line_gap=8)
+
+        # ── Step 6: "AI Generated" badge bottom-left ─────────────────────────
+        badge_font = self._font(16)
+        draw.text((PAD, H - 34), "✦ AI Generated",
+                  font=badge_font, fill=(255, 204, 0, 200))
 
         out_path = self._out / filename
-        img.save(str(out_path), "PNG")
+        bg.convert("RGB").save(str(out_path), "PNG")
+        Path(bg_path).unlink(missing_ok=True)
         return str(out_path)
 
     def generate_carousel(
@@ -185,56 +328,179 @@ class DesignAgent:
         filename: str = "carousel.pdf",
     ) -> str:
         """
-        Render each slide as a 1080×1080 image and combine into a PDF.
-        Each slide dict must have keys 'title' and 'body'.
+        AI-enhanced carousel (Option B):
+          1. One FLUX call → abstract background image
+          2. Each slide reuses that background with a unique color tint overlay
+          3. Pillow draws slide number, title, divider, body text on top
+          4. All slides merged into a PDF
         """
         from fpdf import FPDF
 
-        PALETTE = [
-            (15, 76, 129),    # deep blue
-            (0, 119, 181),    # linkedin blue
-            (0, 150, 136),    # teal
-            (103, 58, 183),   # purple
-            (183, 28, 28),    # red (CTA slide)
-        ]
         W = H = 1080
+
+        # Colour tints per slide index (RGBA overlays)
+        TINTS = [
+            (8,   22,  70,  210),   # Cover     — deep navy
+            (0,   80,  100, 195),   # Slide 2   — dark teal
+            (55,  20,  120, 195),   # Slide 3   — deep purple
+            (0,   60,  80,  195),   # Slide 4   — ocean
+            (80,  40,  0,   195),   # Slide 5   — warm brown
+            (120, 40,  0,   205),   # CTA       — amber/gold
+        ]
+        ACCENT_COLORS = [
+            (0,   119, 181),   # LinkedIn blue
+            (0,   200, 160),   # teal
+            (140, 80,  220),   # purple
+            (0,   160, 200),   # sky
+            (220, 130,  20),   # amber
+            (255, 180,   0),   # gold
+        ]
+
+        # ── Step 1: Generate ONE abstract background ─────────────────────────
+        print("  Generating AI background for carousel (1 API call)...")
+        bg_prompt = (
+            "Abstract professional background, smooth dark gradient, "
+            "soft bokeh light orbs, subtle diagonal geometric lines, "
+            "cinematic depth of field, clean minimal, no text, no letters, "
+            "no words, no typography, no logos, no people, 4K quality."
+        )
+        bg_path = self._generate_image_hf(bg_prompt, "_carousel_bg.png")
+
+        try:
+            bg_master = Image.open(bg_path).convert("RGBA").resize((W, H), Image.LANCZOS)
+        except Exception:
+            bg_master = None   # will use solid colour fallback per slide
+
         slide_paths: List[str] = []
 
-        for i, slide in enumerate(slides[:5]):
-            title = slide.get("title", f"Point {i + 1}")
-            body = slide.get("body", "")
-            bg = PALETTE[i % len(PALETTE)]
+        for i, slide in enumerate(slides):
+            tint   = TINTS[min(i, len(TINTS) - 1)]
+            accent = ACCENT_COLORS[min(i, len(ACCENT_COLORS) - 1)]
+            is_cover = (i == 0)
+            is_cta   = (i == len(slides) - 1)
 
-            img = Image.new("RGB", (W, H), bg)
-            draw = ImageDraw.Draw(img)
+            # ── Base: AI background or solid colour ──────────────────────────
+            if bg_master:
+                base = bg_master.copy()
+            else:
+                base = Image.new("RGBA", (W, H), (tint[0], tint[1], tint[2], 255))
 
-            # Decorative bars
-            draw.rectangle([0, 0, W, 10], fill=(255, 255, 255, 30))
-            draw.rectangle([0, H - 10, W, H], fill=(255, 255, 255, 30))
+            # ── Tint overlay ─────────────────────────────────────────────────
+            tint_layer = Image.new("RGBA", (W, H), tint)
+            base = Image.alpha_composite(base, tint_layer)
 
-            # Slide counter
-            counter_font = self._font(36)
-            draw.text(
-                (48, 44),
-                f"{i + 1} / {len(slides[:5])}",
-                font=counter_font,
-                fill=(255, 255, 255),
-            )
+            # ── Accent bar at bottom ──────────────────────────────────────────
+            bar = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            bar_d = ImageDraw.Draw(bar)
+            bar_d.rectangle([(0, H - 8), (W, H)], fill=(*accent, 255))
+            bar_d.rectangle([(0, 0), (W, 8)],     fill=(*accent, 100))
+            base = Image.alpha_composite(base, bar)
 
-            # Title
-            t_font = self._font(58)
-            y = self._draw_wrapped(draw, title, t_font, (255, 255, 255), W, 60, H // 4)
+            draw = ImageDraw.Draw(base)
+            WHITE = (255, 255, 255)
+            DIM   = (200, 220, 240)
 
-            # Body
-            if body:
-                b_font = self._font(34)
-                self._draw_wrapped(draw, body, b_font, (200, 230, 255), W, 60, y + 30)
+            PAD = 72
 
-            slide_path = self._out / f"_slide_{i}.png"
-            img.save(str(slide_path))
-            slide_paths.append(str(slide_path))
+            if is_cover:
+                # ── COVER SLIDE ───────────────────────────────────────────────
+                # Topic tag
+                tag_font = self._font(22)
+                tag = f"#{topic.upper()}"
+                tb = draw.textbbox((0, 0), tag, font=tag_font)
+                tag_w = tb[2] - tb[0] + 32
+                draw.rounded_rectangle([(PAD, PAD), (PAD + tag_w, PAD + 38)],
+                                        radius=19, fill=(*accent, 210))
+                draw.text((PAD + 16, PAD + 6), tag, font=tag_font, fill=WHITE)
 
-        # Combine slides into a square PDF
+                # Big title
+                t_font = self._font(72)
+                y = self._draw_wrapped(draw, slide.get("title", topic),
+                                       t_font, WHITE, W, PAD, H // 3,
+                                       max_width=W - PAD * 2, align="left", line_gap=14)
+
+                # Accent divider
+                draw.rectangle([(PAD, y + 16), (PAD + 80, y + 22)],
+                                fill=(*accent, 255))
+
+                # Sub-headline
+                sub = slide.get("body", "")
+                if sub:
+                    s_font = self._font(32)
+                    self._draw_wrapped(draw, sub, s_font, DIM, W, PAD, y + 40,
+                                       max_width=W - PAD * 2, align="left", line_gap=10)
+
+                # "Swipe →" prompt
+                sw_font = self._font(24)
+                draw.text((W - PAD, H - PAD), "Swipe →",
+                          font=sw_font, fill=(*accent, 230), anchor="rs")
+
+            elif is_cta:
+                # ── CTA SLIDE ─────────────────────────────────────────────────
+                cta_font = self._font(60)
+                y = self._draw_wrapped(draw, slide.get("title", "Follow for more"),
+                                       cta_font, WHITE, W, PAD, H // 4,
+                                       max_width=W - PAD * 2, align="left", line_gap=12)
+                draw.rectangle([(PAD, y + 18), (PAD + 80, y + 24)],
+                                fill=(*accent, 255))
+                body = slide.get("body", "")
+                if body:
+                    b_font = self._font(30)
+                    self._draw_wrapped(draw, body, b_font, DIM, W, PAD, y + 44,
+                                       max_width=W - PAD * 2, align="left", line_gap=10)
+
+                # Follow button pill
+                btn_font = self._font(26)
+                btn_text = "  Follow for more →  "
+                bb = draw.textbbox((0, 0), btn_text, font=btn_font)
+                btn_w = bb[2] - bb[0] + 20
+                bx = (W - btn_w) // 2
+                draw.rounded_rectangle([(bx, H - 160), (bx + btn_w, H - 108)],
+                                        radius=30, fill=(*accent, 240))
+                draw.text((bx + 10, H - 154), btn_text.strip(),
+                          font=btn_font, fill=WHITE)
+
+            else:
+                # ── CONTENT SLIDE ─────────────────────────────────────────────
+                # Step badge circle
+                badge_font = self._font(38)
+                cx, cy, cr = PAD + 30, PAD + 30, 38
+                draw.ellipse([(cx - cr, cy - cr), (cx + cr, cy + cr)],
+                              fill=(*accent, 230))
+                num = str(i)
+                nb = draw.textbbox((0, 0), num, font=badge_font)
+                draw.text((cx - (nb[2] - nb[0]) // 2,
+                            cy - (nb[3] - nb[1]) // 2 - 2),
+                           num, font=badge_font, fill=WHITE)
+
+                # Title
+                t_font = self._font(54)
+                y = self._draw_wrapped(draw, slide.get("title", ""),
+                                       t_font, WHITE, W, PAD, PAD * 2 + 30,
+                                       max_width=W - PAD * 2, align="left", line_gap=10)
+
+                # Accent divider
+                draw.rectangle([(PAD, y + 14), (PAD + 60, y + 19)],
+                                fill=(*accent, 255))
+
+                # Body text
+                body = slide.get("body", "")
+                if body:
+                    b_font = self._font(30)
+                    self._draw_wrapped(draw, body, b_font, DIM, W, PAD, y + 36,
+                                       max_width=W - PAD * 2, align="left", line_gap=10)
+
+                # Slide counter bottom-right
+                cnt_font = self._font(22)
+                draw.text((W - PAD, H - PAD),
+                          f"{i + 1} / {len(slides)}",
+                          font=cnt_font, fill=(*accent, 200), anchor="rs")
+
+            out = self._out / f"_slide_{i}.png"
+            base.convert("RGB").save(str(out), "PNG")
+            slide_paths.append(str(out))
+
+        # ── Combine into PDF ──────────────────────────────────────────────────
         pdf = FPDF(unit="mm", format=(210, 210))
         for sp in slide_paths:
             pdf.add_page()
@@ -243,10 +509,76 @@ class DesignAgent:
         out_path = self._out / filename
         pdf.output(str(out_path))
 
-        # Clean up temp slide images
         for sp in slide_paths:
             Path(sp).unlink(missing_ok=True)
+        if bg_path:
+            Path(bg_path).unlink(missing_ok=True)
 
+        return str(out_path)
+
+    # ── HTML → Image renderer (Playwright) ───────────────────────────────────
+
+    def _render_html_to_image(
+        self,
+        template_name: str,
+        context: dict,
+        width: int,
+        height: int,
+        filename: str,
+    ) -> str:
+        """Render an HTML/Jinja2 template to a PNG using Playwright headless Chromium."""
+        try:
+            from jinja2 import Environment, FileSystemLoader
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            print("  [WARN] Playwright/Jinja2 not installed. Falling back to Pillow.")
+            return self._flyer_pillow_fallback(
+                context.get("headline_html", context.get("topic", "")),
+                context.get("subtitle", ""),
+                context.get("topic", ""),
+                filename,
+            )
+
+        templates_dir = Path(__file__).parent.parent / "templates"
+        env = Environment(loader=FileSystemLoader(str(templates_dir)))
+        template = env.get_template(template_name)
+        html_content = template.render(**context)
+
+        out_path = self._out / filename
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch()
+                page = browser.new_page(viewport={"width": width, "height": height})
+                page.set_content(html_content, wait_until="networkidle")
+                page.screenshot(path=str(out_path), clip={"x": 0, "y": 0, "width": width, "height": height})
+                browser.close()
+        except Exception as exc:
+            print(f"  [WARN] Playwright render failed ({exc}). Falling back to Pillow.")
+            return self._flyer_pillow_fallback(
+                context.get("headline_html", context.get("topic", "")),
+                context.get("subtitle", ""),
+                context.get("topic", ""),
+                filename,
+            )
+
+        return str(out_path)
+
+    def _flyer_pillow_fallback(
+        self, headline: str, subtitle: str, topic: str, filename: str
+    ) -> str:
+        """Pillow fallback when Playwright is unavailable."""
+        W, H = 1200, 627
+        img = Image.new("RGB", (W, H), (15, 76, 129))
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([0, 0, W, 8], fill=(0, 200, 150))
+        draw.rectangle([0, H - 8, W, H], fill=(0, 200, 150))
+        font_h = self._font(64)
+        font_s = self._font(32)
+        self._draw_wrapped(draw, headline, font_h, (255, 255, 255), W, 60, H // 4)
+        if subtitle:
+            self._draw_wrapped(draw, subtitle, font_s, (200, 220, 240), W, 60, H // 2)
+        out_path = self._out / filename
+        img.save(str(out_path), "PNG")
         return str(out_path)
 
     # ── Utilities ─────────────────────────────────────────────────────────────
@@ -289,12 +621,15 @@ class DesignAgent:
         padding: int,
         start_y: int,
         line_gap: int = 12,
+        max_width: int = None,
+        align: str = "center",
     ) -> int:
         """
-        Draw word-wrapped text centred horizontally.
+        Draw word-wrapped text.  align='center' centres across canvas_w;
+        align='left' left-aligns at x=padding within max_width (or canvas_w-padding*2).
         Returns the y-coordinate immediately after the last line.
         """
-        max_w = canvas_w - padding * 2
+        wrap_w = max_width if max_width else canvas_w - padding * 2
         words = text.split()
         lines: List[str] = []
         current: List[str] = []
@@ -302,7 +637,7 @@ class DesignAgent:
         for word in words:
             test = " ".join(current + [word])
             bbox = draw.textbbox((0, 0), test, font=font)
-            if bbox[2] - bbox[0] <= max_w:
+            if bbox[2] - bbox[0] <= wrap_w:
                 current.append(word)
             else:
                 if current:
@@ -316,7 +651,10 @@ class DesignAgent:
             bbox = draw.textbbox((0, 0), line, font=font)
             line_w = bbox[2] - bbox[0]
             line_h = bbox[3] - bbox[1]
-            x = (canvas_w - line_w) // 2
+            if align == "left":
+                x = padding
+            else:
+                x = (canvas_w - line_w) // 2
             draw.text((x, y), line, font=font, fill=color)
             y += line_h + line_gap
 
