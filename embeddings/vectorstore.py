@@ -129,3 +129,20 @@ class LinkedInVectorStore:
 
     def count(self) -> int:
         return self._collection.count()
+
+    def get_most_recent(self) -> str:
+        """
+        Return the text of the post with the latest 'created' timestamp stored in
+        the collection. Returns empty string if nothing is indexed.
+        """
+        total = self._collection.count()
+        if total == 0:
+            return ""
+        result = self._collection.get(include=["documents", "metadatas"])
+        pairs = list(zip(result["documents"], result["metadatas"]))
+        # Sort descending by the 'created' timestamp stored as a string
+        pairs.sort(
+            key=lambda p: int(p[1].get("created", "0") or "0"),
+            reverse=True,
+        )
+        return pairs[0][0] if pairs else ""

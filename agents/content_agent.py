@@ -64,11 +64,48 @@ class ContentAgent:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
+    def analyze_tone(self, post_text: str) -> str:
+        """
+        Use LLM to extract a tone and style profile from the given post text.
+        Returns a structured plain-text profile used to guide new post generation.
+        """
+        if not post_text.strip():
+            return "No previous post available — use a confident, direct, professional tone with short punchy sentences."
+        response = self._client.chat.completions.create(
+            model=self._model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an expert writing coach. Analyze the LinkedIn post provided "
+                        "and extract a precise tone and style profile. Be specific and actionable "
+                        "— this profile will be used to write a new post that matches the author's voice exactly."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Analyze the tone and style of this LinkedIn post:\n\n{post_text}\n\n"
+                        "Provide a concise profile covering these 7 dimensions (one line each):\n"
+                        "1. Tone: (e.g., motivational, analytical, conversational, authoritative)\n"
+                        "2. Sentence structure: (e.g., short punchy, longer narrative, mixed)\n"
+                        "3. Vocabulary: (e.g., simple/accessible, technical, inspirational, jargon-free)\n"
+                        "4. Formatting: (e.g., numbered lists, bullet points, plain paragraphs, emoji usage)\n"
+                        "5. Hook style: (e.g., bold statement, open question, surprising statistic)\n"
+                        "6. CTA style: (e.g., open reflective question, direct challenge, community invitation)\n"
+                        "7. Visual/design mood: (e.g., bold energetic, clean minimalist, warm professional)"
+                    ),
+                },
+            ],
+            temperature=0.3,
+        )
+        return response.choices[0].message.content.strip()
+
     def generate_post(
         self,
         topic: str,
         user_context: str,
-        past_posts_context: str,
+        tone_profile: str,
         post_format: PostFormat,
     ) -> dict:
         """
@@ -78,7 +115,7 @@ class ContentAgent:
           + slides: [{title, body}, ...]    (CAROUSEL only)
         """
         user_prompt = self._build_prompt(
-            topic, user_context, past_posts_context, post_format
+            topic, user_context, tone_profile, post_format
         )
         response = self._client.chat.completions.create(
             model=self._model,
@@ -98,7 +135,7 @@ class ContentAgent:
         self,
         topic: str,
         user_context: str,
-        past_posts_context: str,
+        tone_profile: str,
         post_format: PostFormat,
     ) -> str:
         format_instructions = {
@@ -135,20 +172,26 @@ class ContentAgent:
             ),
         }
 
-        return f"""You are writing a LinkedIn post for a professional in this niche.
+        return f"""You are writing a LinkedIn post for a professional.
 
 TOPIC: {topic}
 ADDITIONAL CONTEXT / KEY POINTS: {user_context or "None provided"}
 
-PAST POSTS FOR STYLE REFERENCE:
-{past_posts_context}
+AUTHOR'S TONE & STYLE PROFILE (extracted from their most recent LinkedIn post):
+{tone_profile}
+
+CRITICAL INSTRUCTION: Mirror the EXACT tone, vocabulary, sentence structure, hook style, \
+and CTA style described in the profile above. The new post must feel like it was written \
+by the same person in the same voice — not a generic LinkedIn post.
 
 FORMAT REQUIREMENT:
 {format_instructions[post_format]}
 
 ALSO ALWAYS INCLUDE IN YOUR JSON:
 - "hashtags": list of exactly 5 highly relevant hashtags (with # prefix, mix popular + niche)
-- "image_prompt": a vivid, detailed image generation prompt (describe scene, style, mood, colors) — suitable for generating a professional LinkedIn visual
+- "image_prompt": a vivid, detailed image generation prompt that matches the visual/design mood \
+from the style profile above (describe scene, style, mood, colors) — suitable for generating \
+a professional LinkedIn visual
 
 CRITICAL REMINDERS:
 - The "text" field must be a FULLY WRITTEN, well-elaborated LinkedIn post — not a placeholder or topic restatement.

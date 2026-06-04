@@ -127,6 +127,21 @@ class MockLinkedInAPIClient:
     def fetch_posts(self, person_urn: str, count: int = 50) -> list[dict]:
         return SAMPLE_POSTS
 
+    def fetch_last_post(self, person_urn: str) -> str:
+        """Return the most recent mock post text (sorted by created timestamp desc)."""
+        sorted_posts = sorted(
+            SAMPLE_POSTS, key=lambda p: p["created"]["time"], reverse=True
+        )
+        if not sorted_posts:
+            return ""
+        try:
+            return (
+                sorted_posts[0]["specificContent"]["com.linkedin.ugc.ShareContent"]
+                ["shareCommentary"]["text"]
+            )
+        except (KeyError, TypeError):
+            return ""
+
     # ── Mock upload methods (all no-ops) ──────────────────────────────────────
 
     def register_image_upload(self, person_urn: str) -> dict:

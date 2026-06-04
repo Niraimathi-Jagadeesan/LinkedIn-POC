@@ -45,7 +45,9 @@ class AgentState(TypedDict):
     person_urn: str
 
     # Pipeline data
-    past_posts_context: str
+    last_post_text: str       # raw text of the most recent LinkedIn post
+    tone_profile: str         # LLM-extracted tone & style from last_post_text
+    past_posts_context: str   # kept for backward compat (unused in generation)
     generated_text: str
     hashtags: List[str]
     image_prompt: str
@@ -72,7 +74,7 @@ class AgentState(TypedDict):
 
 def retrieve_context(state: AgentState) -> AgentState:
     settings = get_settings()
-    print("\n[1/5] Reading your past LinkedIn posts for context...")
+    print("\n[1/6] Fetching your latest LinkedIn post and indexing history...")
     if settings.mock_linkedin:
         token = None
     else:
@@ -81,21 +83,36 @@ def retrieve_context(state: AgentState) -> AgentState:
     vectorstore = LinkedInVectorStore()
     rag = RAGAgent(api_client, vectorstore)
 
-    if vectorstore.count() == 0:
-        rag.index_past_posts(state["person_urn"])
+    # Always try to fetch and index posts so the vectorstore stays up to date
+    rag.index_past_posts(state["person_urn"])
 
-    context = rag.retrieve_context(state["topic"], state["user_context"])
-    return {**state, "past_posts_context": context}
+    last_post_text = rag.get_last_post_text(state["person_urn"])
+    if last_post_text:
+        print("  Last post retrieved — tone analysis will follow.")
+    else:
+        print("  No previous posts found — will use default professional tone.")
+    return {**state, "last_post_text": last_post_text, "past_posts_context": ""}
+
+
+def analyze_tone(state: AgentState) -> AgentState:
+    print("\n[2/6] Analyzing tone and style from your last post...")
+    agent = ContentAgent()
+    profile = agent.analyze_tone(state["last_post_text"])
+    if state["last_post_text"].strip():
+        print("  Tone profile extracted — new content will match your writing voice.")
+    else:
+        print("  No previous post found — using default professional tone.")
+    return {**state, "tone_profile": profile}
 
 
 def generate_content(state: AgentState) -> AgentState:
-    print("\n[2/5] Generating content with AI (GPT-4o)...")
+    print("\n[3/6] Generating content with AI (GPT-4o)...")
     agent = ContentAgent()
     fmt = PostFormat(state["post_format"])
     result = agent.generate_post(
         topic=state["topic"],
         user_context=state["user_context"],
-        past_posts_context=state["past_posts_context"],
+        tone_profile=state["tone_profile"],
         post_format=fmt,
     )
     return {
@@ -118,12 +135,12 @@ def create_visual(state: AgentState) -> AgentState:
     agent = DesignAgent()
 
     if fmt == PostFormat.IMAGE:
-        print("\n[3/5] Generating image with FLUX.1-schnell...")
+        print("\n[4/6] Generating image with FLUX.1-schnell...")
         path = agent.generate_image(state["image_prompt"])
         return {**state, "image_path": path}
 
     if fmt == PostFormat.FLYER:
-        print("\n[3/5] Designing flyer graphic...")
+        print("\n[4/6] Designing flyer graphic...")
         path = agent.generate_flyer(
             headline=state.get("flyer_headline") or state["topic"],
             subtitle=state.get("flyer_subtitle") or "",
@@ -132,7 +149,7 @@ def create_visual(state: AgentState) -> AgentState:
         return {**state, "flyer_path": path}
 
     if fmt == PostFormat.CAROUSEL:
-        print("\n[3/5] Building carousel slides...")
+        print("\n[4/6] Building carousel slides...")
         slides = state.get("slides") or []
         if not slides:
             # Fallback: split text into 5 chunks
@@ -151,7 +168,7 @@ def create_visual(state: AgentState) -> AgentState:
 def human_review(state: AgentState) -> AgentState:
     sep = "=" * 60
     print(f"\n{sep}")
-    print("[4/5] REVIEW GENERATED CONTENT")
+    print("[5/6] REVIEW GENERATED CONTENT")
     print(sep)
     print(f"\nFormat : {state['post_format'].upper()}")
     print(f"\nPost text:\n{state['generated_text']}")
@@ -192,7 +209,7 @@ def publish(state: AgentState) -> AgentState:
     elif settings.dry_run:
         label = "[DRY RUN] Simulating publish (no post sent)"
     else:
-        label = "[5/5] Publishing to LinkedIn..."
+        label = "[6/6] Publishing to LinkedIn..."
     print(f"\n{label}")
     token = None if settings.mock_linkedin else get_access_token()
     api_client = _get_api_client(token)
@@ -253,13 +270,15 @@ def build_graph():
     wf = StateGraph(AgentState)
 
     wf.add_node("retrieve_context", retrieve_context)
+    wf.add_node("analyze_tone", analyze_tone)
     wf.add_node("generate_content", generate_content)
     wf.add_node("create_visual", create_visual)
     wf.add_node("human_review", human_review)
     wf.add_node("publish", publish)
 
     wf.set_entry_point("retrieve_context")
-    wf.add_edge("retrieve_context", "generate_content")
+    wf.add_edge("retrieve_context", "analyze_tone")
+    wf.add_edge("analyze_tone", "generate_content")
 
     wf.add_conditional_edges(
         "generate_content",
@@ -305,7 +324,7 @@ def main():
 
     if settings.mock_linkedin:
         print("\n[MOCK MODE] LinkedIn is fully mocked — no LinkedIn credentials needed.")
-        print("[MOCK MODE] Using 5 built-in sample posts as your post history.")
+        print("[MOCK MODE] Using your most recent mock post to derive tone and style.")
         api_client = MockLinkedInAPIClient()
         person_urn = MOCK_PERSON_URN
         name = "Test User (Mock)"
@@ -367,6 +386,8 @@ def main():
         "post_format": post_format,
         "person_urn": person_urn,
         "past_posts_context": "",
+        "last_post_text": "",
+        "tone_profile": "",
         "generated_text": "",
         "hashtags": [],
         "image_prompt": "",

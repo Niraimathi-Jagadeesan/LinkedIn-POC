@@ -22,6 +22,22 @@ class RAGAgent:
         print(f"Indexed {count} new posts into memory ({len(posts)} total fetched).")
         return count
 
+    def get_last_post_text(self, person_urn: str) -> str:
+        """
+        Return the text of the most recently published LinkedIn post.
+        Tries the live API first; falls back to the ChromaDB vectorstore
+        (which holds previously indexed posts) if the API returns nothing.
+        """
+        text = self._api.fetch_last_post(person_urn)
+        if text:
+            return text
+        # API returned nothing (scope not granted, token expired, mock, etc.)
+        # Fall back to whatever is already indexed in ChromaDB.
+        text = self._vs.get_most_recent()
+        if text:
+            print("  [INFO] Live API returned no posts — using most recent indexed post from local store.")
+        return text
+
     def retrieve_context(self, topic: str, user_context: str) -> str:
         """Return a formatted string of the 3 most relevant past posts."""
         query = f"{topic} {user_context}".strip()

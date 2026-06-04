@@ -54,8 +54,30 @@ class LinkedInAPIClient:
             resp = self._session.get(url, timeout=20)
             resp.raise_for_status()
             return resp.json().get("elements", [])
-        except Exception:
+        except Exception as exc:
+            print(f"  [WARN] Could not fetch posts from LinkedIn API: {exc}")
             return []
+
+    def fetch_last_post(self, person_urn: str) -> str:
+        """Return the text of the most recently published post, or empty string."""
+        posts = self.fetch_posts(person_urn, count=1)
+        if not posts:
+            return ""
+        text = self._extract_post_text(posts[0])
+        if not text:
+            print("  [WARN] Latest post found but text could not be extracted (unexpected API response shape).")
+        return text
+
+    @staticmethod
+    def _extract_post_text(post: dict) -> str:
+        """Extract the commentary text from a LinkedIn post dict."""
+        try:
+            return (
+                post["specificContent"]["com.linkedin.ugc.ShareContent"]
+                ["shareCommentary"]["text"]
+            )
+        except (KeyError, TypeError):
+            return ""
 
     # ── Media Upload — Image ──────────────────────────────────────────────────
 
