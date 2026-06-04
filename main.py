@@ -49,6 +49,7 @@ class AgentState(TypedDict):
     generated_text: str
     hashtags: List[str]
     image_prompt: str
+    hook_line: Optional[str]          # first sentence, overlaid on the image
     flyer_headline: Optional[str]
     flyer_subtitle: Optional[str]
     slides: Optional[List[dict]]   # carousel slides
@@ -102,6 +103,7 @@ def generate_content(state: AgentState) -> AgentState:
         "generated_text": result["text"],
         "hashtags": result["hashtags"],
         "image_prompt": result["image_prompt"],
+        "hook_line": result.get("hook_line", ""),
         "flyer_headline": result.get("flyer_headline", state["topic"]),
         "flyer_subtitle": result.get("flyer_subtitle", ""),
         "slides": result.get("slides", []),
@@ -116,7 +118,7 @@ def create_visual(state: AgentState) -> AgentState:
     agent = DesignAgent()
 
     if fmt == PostFormat.IMAGE:
-        print("\n[3/5] Generating image with DALL-E 3...")
+        print("\n[3/5] Generating image with FLUX.1-schnell...")
         path = agent.generate_image(state["image_prompt"])
         return {**state, "image_path": path}
 
@@ -368,6 +370,7 @@ def main():
         "generated_text": "",
         "hashtags": [],
         "image_prompt": "",
+        "hook_line": None,
         "flyer_headline": None,
         "flyer_subtitle": None,
         "slides": None,

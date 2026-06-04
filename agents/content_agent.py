@@ -38,9 +38,22 @@ def _build_llm_client(settings) -> tuple["OpenAI", str]:
 
 class ContentAgent:
     _SYSTEM_PROMPT = (
-        "You are an expert LinkedIn content creator. "
-        "Study the user's past posts to match their writing style, tone, and voice. "
-        "Always write in first person. Keep content professional yet conversational. "
+        "You are a world-class LinkedIn content strategist and copywriter with 10+ years "
+        "of experience growing professional audiences. Your posts consistently achieve "
+        "high engagement through storytelling, insight, and a strong personal voice.\n\n"
+        "Rules you ALWAYS follow:\n"
+        "1. Open with a powerful HOOK (bold statement, surprising stat, or provocative question) — "
+        "the first line must stop the scroll.\n"
+        "2. Write in first person, conversational but authoritative tone.\n"
+        "3. Use short punchy sentences. Break long ideas into single-line paragraphs.\n"
+        "4. Include a real-world insight, data point, or concrete example tied to the topic.\n"
+        "5. Expand and elaborate — do NOT just restate the topic. Tell a story around it.\n"
+        "6. Build to a clear takeaway or lesson.\n"
+        "7. End with a genuine call-to-action (question, challenge, or invitation to comment).\n"
+        "8. Never use corporate buzzwords like 'leverage', 'synergy', 'circle back'.\n"
+        "9. NEVER use markdown formatting: no **bold**, no ##headings, no bullet dashes (-), "
+        "no backticks. Plain text only. Use line breaks (\\n) for structure.\n"
+        "10. Study the user's past posts to mirror their vocabulary and voice.\n"
         "Output ONLY valid JSON — no markdown fences, no extra commentary."
     )
 
@@ -90,50 +103,89 @@ class ContentAgent:
     ) -> str:
         format_instructions = {
             PostFormat.TEXT: (
-                "Write a compelling LinkedIn text post (max 1 300 characters). "
-                "Use short paragraphs and line breaks. End with a question or CTA."
+                "Write a compelling LinkedIn text post (1 000–1 500 characters).\n"
+                "Structure: Hook (1 line) → Context/Story (3-5 short paragraphs) → "
+                "Key insight or list of 3-5 takeaways → Strong CTA question.\n"
+                "Use blank lines between every paragraph. Use emojis sparingly (1-2 max) "
+                "only where they genuinely add clarity."
             ),
             PostFormat.IMAGE: (
-                "Write a short LinkedIn image caption (max 300 characters) that "
-                "complements a visual. Punchy and engaging."
+                "Write a full LinkedIn post to accompany an image (800–1 200 characters).\n"
+                "Structure: Powerful hook (1 bold line) → Story or insight (3-4 short paragraphs) "
+                "→ 3-5 key takeaways or bullet points → CTA question.\n"
+                "The post must work as a standalone read even without the image.\n"
+                "Also provide 'hook_line': the very first sentence only (max 12 words), "
+                "used as a text overlay on the image."
             ),
             PostFormat.FLYER: (
-                "Write a LinkedIn post caption (max 200 characters). "
-                "Also provide a 'flyer_headline' (max 10 words) and a "
-                "'flyer_subtitle' (max 20 words) for the graphic card."
+                "Write a LinkedIn flyer post caption (300–500 characters).\n"
+                "Structure: Hook → 1-2 value sentences → CTA.\n"
+                "Also provide:\n"
+                "- 'flyer_headline': punchy headline max 8 words (ALL CAPS impact phrase)\n"
+                "- 'flyer_subtitle': supporting line max 15 words that expands on the headline"
             ),
             PostFormat.CAROUSEL: (
-                "Write a LinkedIn post caption (max 200 characters) to introduce "
-                "the carousel. Also provide a 'slides' array of exactly 5 objects "
-                "each with 'title' (max 8 words) and 'body' (max 40 words)."
+                "Write a LinkedIn carousel post caption (300–500 characters) that teases "
+                "the value inside ('Swipe to discover...' style hook).\n"
+                "Also provide a 'slides' array of exactly 6 objects:\n"
+                "  - Slide 1: Cover — 'title': bold hook title, 'body': 1-line sub-headline\n"
+                "  - Slides 2-5: Content — 'title': clear point (max 7 words), "
+                "'body': 40-60 word elaboration with a concrete example or stat\n"
+                "  - Slide 6: CTA — 'title': call-to-action phrase, 'body': engaging closing question"
             ),
         }
 
-        return f"""Topic: {topic}
-Additional context: {user_context or "None"}
+        return f"""You are writing a LinkedIn post for a professional in this niche.
 
+TOPIC: {topic}
+ADDITIONAL CONTEXT / KEY POINTS: {user_context or "None provided"}
+
+PAST POSTS FOR STYLE REFERENCE:
 {past_posts_context}
 
-Format requirement:
+FORMAT REQUIREMENT:
 {format_instructions[post_format]}
 
-Also always include:
-- "hashtags": list of exactly 5 relevant hashtags (with # prefix)
-- "image_prompt": a detailed DALL-E image generation prompt that visually represents the topic
+ALSO ALWAYS INCLUDE IN YOUR JSON:
+- "hashtags": list of exactly 5 highly relevant hashtags (with # prefix, mix popular + niche)
+- "image_prompt": a vivid, detailed image generation prompt (describe scene, style, mood, colors) — suitable for generating a professional LinkedIn visual
 
-Return valid JSON only."""
+CRITICAL REMINDERS:
+- The "text" field must be a FULLY WRITTEN, well-elaborated LinkedIn post — not a placeholder or topic restatement.
+- NO markdown in text fields: no **bold**, no ##, no dashes, no backticks. Plain text + newlines only.
+- Write as if this will be copy-pasted directly into LinkedIn.
+
+Return ONLY a valid JSON object. No explanation outside the JSON."""
+
+    @staticmethod
+    def _clean_text(text: str) -> str:
+        """Strip markdown formatting that leaks into LinkedIn post text."""
+        import re
+        # Remove **bold** and *italic*
+        text = re.sub(r'\*{1,3}(.*?)\*{1,3}', r'\1', text)
+        # Remove ##headings
+        text = re.sub(r'^#{1,6}\s*', '', text, flags=re.MULTILINE)
+        # Remove backticks
+        text = re.sub(r'`+', '', text)
+        # Convert markdown bullet dashes at line start to a clean bullet
+        text = re.sub(r'^\s*[-*]\s+', '• ', text, flags=re.MULTILINE)
+        # Collapse 3+ newlines to 2
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        return text.strip()
 
     @staticmethod
     def _normalise(raw: dict, topic: str) -> dict:
         """Ensure required keys are present with sensible fallbacks."""
+        clean = ContentAgent._clean_text
         return {
-            "text": raw.get("text", ""),
+            "text": clean(raw.get("text", "")),
             "hashtags": raw.get("hashtags", []),
             "image_prompt": raw.get(
                 "image_prompt",
                 f"Professional LinkedIn graphic about {topic}, clean modern design",
             ),
-            "flyer_headline": raw.get("flyer_headline", topic),
-            "flyer_subtitle": raw.get("flyer_subtitle", ""),
+            "hook_line": clean(raw.get("hook_line", "")),
+            "flyer_headline": clean(raw.get("flyer_headline", topic)),
+            "flyer_subtitle": clean(raw.get("flyer_subtitle", "")),
             "slides": raw.get("slides", []),
         }

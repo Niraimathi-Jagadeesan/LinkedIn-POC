@@ -15,12 +15,15 @@ class Settings(BaseSettings):
     # Groq (free tier — https://console.groq.com)
     groq_api_key: str = ""
 
+    # Hugging Face (free — https://huggingface.co/settings/tokens)
+    hf_api_token: str = ""
+
     # Ollama (local, fully offline — https://ollama.com)
     ollama_base_url: str = "http://localhost:11434/v1"
 
     # Provider selection
     llm_provider: str = "openai"      # openai | groq | ollama
-    image_provider: str = "openai"    # openai | pollinations
+    image_provider: str = "openai"    # openai | huggingface | pollinations
     embedding_provider: str = "openai" # openai | local
 
     # Agent config
