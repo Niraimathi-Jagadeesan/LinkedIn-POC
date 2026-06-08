@@ -130,6 +130,17 @@ def generate_content(state: AgentState) -> AgentState:
     }
 
 
+def _first_sentence(text: str, max_chars: int = 160) -> str:
+    """Extract the first sentence from text, capped at max_chars."""
+    if not text:
+        return ""
+    for sep in (". ", ".\n", "!\n", "? ", "?\n"):
+        idx = text.find(sep)
+        if 0 < idx <= max_chars:
+            return text[: idx + 1].strip()
+    return text[:max_chars].rsplit(" ", 1)[0].strip()
+
+
 def create_visual(state: AgentState) -> AgentState:
     fmt = PostFormat(state["post_format"])
     agent = DesignAgent()
@@ -137,14 +148,21 @@ def create_visual(state: AgentState) -> AgentState:
     if fmt == PostFormat.IMAGE:
         print("\n[4/6] Generating image with FLUX.1-schnell...")
         path = agent.generate_image(state["image_prompt"])
+        # Overlay the hook line so the image carries the post message
+        hook = (state.get("hook_line") or "").strip()
+        if hook:
+            path = agent.add_text_overlay(path, hook)
         return {**state, "image_path": path}
 
     if fmt == PostFormat.FLYER:
         print("\n[4/6] Designing flyer graphic...")
+        # Pull the first sentence of the post as a key-insight excerpt
+        body_text = _first_sentence(state.get("generated_text", ""), max_chars=160)
         path = agent.generate_flyer(
             headline=state.get("flyer_headline") or state["topic"],
             subtitle=state.get("flyer_subtitle") or "",
             topic=state["topic"],
+            body_text=body_text,
         )
         return {**state, "flyer_path": path}
 
@@ -152,14 +170,19 @@ def create_visual(state: AgentState) -> AgentState:
         print("\n[4/6] Building carousel slides...")
         slides = state.get("slides") or []
         if not slides:
-            # Fallback: split text into 5 chunks
-            words = state["generated_text"].split()
-            chunk = max(1, len(words) // 5)
-            slides = [
-                {"title": f"Point {i+1}", "body": " ".join(words[i*chunk:(i+1)*chunk])}
-                for i in range(5)
-            ]
-        path = agent.generate_carousel(slides, state["topic"])
+            # Fallback: build 6 structured slides from the generated text
+            text = state["generated_text"]
+            sentences = [s.strip() for s in text.replace("\n", " ").split(". ") if s.strip()]
+            chunks = [" ". join(sentences[i: i + max(1, len(sentences) // 5)])
+                      for i in range(0, len(sentences), max(1, len(sentences) // 5))]
+            slides = (
+                [{"title": state["topic"], "body": _first_sentence(text, 120)}]
+                + [{"title": f"Key Point {i+1}", "body": c} for i, c in enumerate(chunks[:4])]
+                + [{"title": "What do you think?", "body": "Share your thoughts in the comments below."}]
+            )
+        # Use the post hook line on the carousel cover for immediate context
+        post_hook = (state.get("hook_line") or _first_sentence(state.get("generated_text", ""), 120)).strip()
+        path = agent.generate_carousel(slides, state["topic"], post_hook=post_hook)
         return {**state, "carousel_path": path}
 
     return state  # TEXT — nothing to generate

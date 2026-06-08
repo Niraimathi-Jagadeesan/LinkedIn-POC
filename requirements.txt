@@ -8,3 +8,5 @@ langchain-core>=0.2.0
 chromadb>=0.4.22
 Pillow>=10.2.0
 fpdf2>=2.7.9
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0

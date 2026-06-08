@@ -6,6 +6,7 @@ Design Agent — generates visuals for LinkedIn posts.
 """
 
 import platform
+import unicodedata
 import urllib.parse
 from pathlib import Path
 from typing import List
@@ -18,6 +19,22 @@ from config.settings import get_settings
 
 
 class DesignAgent:
+    # Five visual styles — cycles on each regeneration so every flyer looks different
+    _FLYER_PALETTES = [
+        {"panel": (8,  22, 50),  "top": (0,  119, 181), "bot": (255, 204,   0), "sub": (180, 215, 245)},
+        {"panel": (45, 10, 28),  "top": (210,  30,  85), "bot": (255, 180,   0), "sub": (245, 180, 200)},
+        {"panel": (12, 48, 22),  "top": (0,  165,  60), "bot": (155, 255,  80), "sub": (170, 240, 190)},
+        {"panel": (55, 32,  5),  "top": (220, 130,   0), "bot": (255, 230,  60), "sub": (255, 220, 165)},
+        {"panel": (32,  5, 58),  "top": (118,  40, 210), "bot": (210, 150, 255), "sub": (215, 185, 255)},
+    ]
+    _BG_MOODS = [
+        "dark navy blue gradient, subtle geometric angular lines",
+        "deep teal to dark plum gradient, flowing organic curves",
+        "dark forest green gradient, abstract botanical shapes",
+        "warm charcoal to dark amber gradient, concentric geometric rings",
+        "deep indigo to midnight violet gradient, crystalline lattice patterns",
+    ]
+
     def __init__(self) -> None:
         settings = get_settings()
         self._image_provider = settings.image_provider
@@ -231,6 +248,7 @@ class DesignAgent:
         headline: str,
         subtitle: str,
         topic: str,
+        body_text: str = "",
         filename: str = "flyer.png",
     ) -> str:
         """
@@ -242,10 +260,16 @@ class DesignAgent:
         """
         W, H = 1200, 627
 
-        # ── Step 1: ABSTRACT background — no topic keywords to avoid text in image ──
+        # ── Step 1: Pick a visual style palette then match background mood ────
+        pal_idx = abs(hash(headline + body_text + subtitle)) % len(self._FLYER_PALETTES)
+        pal     = self._FLYER_PALETTES[pal_idx]
+        ACCENT  = pal["top"]
+        BOT     = pal["bot"]
+        SUB_COL = pal["sub"]
+
         bg_prompt = (
-            "Abstract professional background, dark navy blue gradient, "
-            "soft bokeh light orbs, subtle geometric lines, cinematic depth of field, "
+            f"Abstract professional background, {self._BG_MOODS[pal_idx]}, "
+            "soft bokeh light orbs, cinematic depth of field, "
             "clean minimal corporate aesthetic, no text, no letters, no words, "
             "no typography, no logos, no people, 4K quality."
         )
@@ -254,41 +278,41 @@ class DesignAgent:
         try:
             bg = Image.open(bg_path).convert("RGBA").resize((W, H), Image.LANCZOS)
         except Exception:
-            return self._flyer_pillow_fallback(headline, subtitle, topic, filename)
+            return self._flyer_pillow_fallback(headline, subtitle, topic, filename, body_text)
 
-        # ── Step 2: Solid text panel on left 52% of image ────────────────────
-        PANEL_W = int(W * 0.52)
-        PANEL_COLOR = (8, 22, 50, 230)          # near-opaque dark navy
+        # ── Step 2: Solid text panel on left 52% using palette colour ─────────
+        PANEL_W   = int(W * 0.52)
+        PANEL_RGB = pal["panel"]
 
         overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
         ov_draw = ImageDraw.Draw(overlay)
 
         # Solid panel left side
-        ov_draw.rectangle([(0, 0), (PANEL_W, H)], fill=PANEL_COLOR)
+        ov_draw.rectangle([(0, 0), (PANEL_W, H)], fill=(*PANEL_RGB, 230))
 
-        # Soft feather: blend panel edge into the photo over 80px
+        # Soft feather: blend panel edge into the photo over 80 px
         for x in range(80):
-            alpha = int(PANEL_COLOR[3] * (1 - x / 80))
+            alpha = int(230 * (1 - x / 80))
             ov_draw.rectangle([(PANEL_W + x, 0), (PANEL_W + x + 1, H)],
-                              fill=(8, 22, 50, alpha))
+                              fill=(*PANEL_RGB, alpha))
 
-        # LinkedIn blue top stripe + gold bottom stripe
-        ov_draw.rectangle([(0, 0),      (W, 7)], fill=(0, 119, 181, 255))
-        ov_draw.rectangle([(0, H - 7),  (W, H)], fill=(255, 204, 0,  255))
+        # Top and bottom stripes in palette accent colours
+        ov_draw.rectangle([(0, 0),     (W, 7)], fill=(*ACCENT, 255))
+        ov_draw.rectangle([(0, H - 7), (W, H)], fill=(*BOT,    255))
 
         bg = Image.alpha_composite(bg, overlay)
         draw = ImageDraw.Draw(bg)
 
         PAD = 56   # left padding for all text
 
-        # ── Step 3: Topic pill tag ────────────────────────────────────────────
-        tag_font = self._font(18)
-        tag_text = f"#{topic.upper()}"
-        tb = draw.textbbox((0, 0), tag_text, font=tag_font)
-        tag_w = tb[2] - tb[0] + 28
-        draw.rounded_rectangle([(PAD, 30), (PAD + tag_w, 30 + 32)],
-                                radius=16, fill=(0, 119, 181, 255))
-        draw.text((PAD + 14, 34), tag_text, font=tag_font, fill=(255, 255, 255))
+        # ── Step 3: Topic label (plain rect — avoids cross-platform artefacts) ──
+        tag_font = self._font(22)
+        tag_text = "#" + self._ascii_tag(topic)
+        tb       = draw.textbbox((0, 0), tag_text, font=tag_font)
+        tag_w    = tb[2] - tb[0] + 32
+        draw.rectangle([(PAD,     26), (PAD + tag_w, 26 + 38)], fill=(*ACCENT, 255))
+        draw.rectangle([(PAD,     26), (PAD + 6,     26 + 38)], fill=(*BOT,    255))
+        draw.text((PAD + 16, 31), tag_text, font=tag_font, fill=(255, 255, 255))
 
         # ── Step 4: Headline (large, bold, white) ─────────────────────────────
         # Use a key phrase from the headline — strip filler words for impact
@@ -298,23 +322,33 @@ class DesignAgent:
                                max_width=PANEL_W - PAD - 20, align="left",
                                line_gap=10)
 
-        # Gold accent divider under headline
+        # Accent divider under headline in palette colour
         draw.rectangle([(PAD, y + 10), (PAD + 60, y + 14)],
-                       fill=(255, 204, 0, 255))
+                       fill=(*BOT, 255))
         y += 34
 
-        # ── Step 5: Subtitle (medium, light blue) ────────────────────────────
+        # ── Step 5: Subtitle (palette-matched colour) ────────────────────────
         if subtitle:
             s_font = self._font(26)
-            y = self._draw_wrapped(draw, subtitle, s_font, (180, 215, 245),
+            y = self._draw_wrapped(draw, subtitle, s_font, SUB_COL,
                                    W, PAD, y,
                                    max_width=PANEL_W - PAD - 20, align="left",
                                    line_gap=8)
-
-        # ── Step 6: "AI Generated" badge bottom-left ─────────────────────────
+        # ── Step 5b: Key insight excerpt from the post body ─────────────────────
+        if body_text:
+            y += 24
+            # Vertical accent bar as quote indicator
+            draw.rectangle([(PAD, y), (PAD + 4, y + 90)], fill=(*ACCENT, 200))
+            bi_font = self._font(22)
+            y = self._draw_wrapped(
+                draw, f'“{body_text}”', bi_font, (220, 235, 255),
+                W, PAD + 18, y,
+                max_width=PANEL_W - PAD - 38, align="left", line_gap=7,
+            )
+        # ── Step 6: Badge bottom-left ────────────────────────────────────────
         badge_font = self._font(16)
-        draw.text((PAD, H - 34), "✦ AI Generated",
-                  font=badge_font, fill=(255, 204, 0, 200))
+        draw.text((PAD, H - 34), "+ AI Generated",
+                  font=badge_font, fill=(*BOT, 200))
 
         out_path = self._out / filename
         bg.convert("RGB").save(str(out_path), "PNG")
@@ -325,6 +359,7 @@ class DesignAgent:
         self,
         slides: List[dict],
         topic: str,
+        post_hook: str = "",
         filename: str = "carousel.pdf",
     ) -> str:
         """
@@ -406,7 +441,7 @@ class DesignAgent:
                 # ── COVER SLIDE ───────────────────────────────────────────────
                 # Topic tag
                 tag_font = self._font(22)
-                tag = f"#{topic.upper()}"
+                tag = "#" + self._ascii_tag(topic)
                 tb = draw.textbbox((0, 0), tag, font=tag_font)
                 tag_w = tb[2] - tb[0] + 32
                 draw.rounded_rectangle([(PAD, PAD), (PAD + tag_w, PAD + 38)],
@@ -423,8 +458,8 @@ class DesignAgent:
                 draw.rectangle([(PAD, y + 16), (PAD + 80, y + 22)],
                                 fill=(*accent, 255))
 
-                # Sub-headline
-                sub = slide.get("body", "")
+                # Sub-headline — prefer the actual post hook so readers get context
+                sub = post_hook or slide.get("body", "")
                 if sub:
                     s_font = self._font(32)
                     self._draw_wrapped(draw, sub, s_font, DIM, W, PAD, y + 40,
@@ -564,19 +599,28 @@ class DesignAgent:
         return str(out_path)
 
     def _flyer_pillow_fallback(
-        self, headline: str, subtitle: str, topic: str, filename: str
+        self, headline: str, subtitle: str, topic: str, filename: str,
+        body_text: str = "",
     ) -> str:
-        """Pillow fallback when Playwright is unavailable."""
+        """Pillow fallback when HF image generation is unavailable."""
+        pal_idx = abs(hash(headline + body_text + subtitle)) % len(self._FLYER_PALETTES)
+        pal    = self._FLYER_PALETTES[pal_idx]
+        ACCENT = pal["top"]
+        BOT    = pal["bot"]
         W, H = 1200, 627
-        img = Image.new("RGB", (W, H), (15, 76, 129))
+        img = Image.new("RGB", (W, H), pal["panel"])
         draw = ImageDraw.Draw(img)
-        draw.rectangle([0, 0, W, 8], fill=(0, 200, 150))
-        draw.rectangle([0, H - 8, W, H], fill=(0, 200, 150))
+        draw.rectangle([0, 0, W, 8], fill=ACCENT)
+        draw.rectangle([0, H - 8, W, H], fill=BOT)
         font_h = self._font(64)
         font_s = self._font(32)
-        self._draw_wrapped(draw, headline, font_h, (255, 255, 255), W, 60, H // 4)
+        y = self._draw_wrapped(draw, headline, font_h, (255, 255, 255), W, 60, H // 4)
         if subtitle:
-            self._draw_wrapped(draw, subtitle, font_s, (200, 220, 240), W, 60, H // 2)
+            y = self._draw_wrapped(draw, subtitle, font_s, pal["sub"], W, 60, y + 20)
+        if body_text:
+            draw.rectangle([60, y + 20, 64, y + 100], fill=ACCENT)
+            self._draw_wrapped(draw, f'“{body_text}”', self._font(22), (220, 235, 255),
+                               W, 80, y + 22, max_width=W // 2 - 80)
         out_path = self._out / filename
         img.save(str(out_path), "PNG")
         return str(out_path)
@@ -584,12 +628,38 @@ class DesignAgent:
     # ── Utilities ─────────────────────────────────────────────────────────────
 
     @staticmethod
+    @staticmethod
+    def _ascii_tag(text: str, max_chars: int = 28) -> str:
+        """
+        Convert topic text to a safe ASCII uppercase tag label.
+        Normalises Unicode (e.g. é→e, em-dash→stripped) so Pillow never
+        tries to render a glyph the font doesn't have (which shows as □).
+        Truncates to max_chars words so the tag fits inside the panel.
+        """
+        # NFKD decomposition turns accented letters into base+combining;
+        # encoding to ASCII then drops the combining marks and any other
+        # non-ASCII codepoints (curly quotes, zero-width spaces, etc.).
+        normalised = unicodedata.normalize("NFKD", text)
+        ascii_only = normalised.encode("ascii", "ignore").decode("ascii")
+        # Keep only printable characters, collapse whitespace
+        clean = " ".join(ascii_only.split()).upper()
+        # Hard-truncate at max_chars to prevent overflow
+        if len(clean) > max_chars:
+            clean = clean[:max_chars].rsplit(" ", 1)[0]  # break on word boundary
+        return clean or "TOPIC"
+
+    @staticmethod
     def _font(size: int) -> ImageFont.FreeTypeFont:
         """Load the best available system font at the given size."""
         candidates = {
             "Windows": [
                 "C:\\Windows\\Fonts\\Arial.ttf",
+                "C:\\Windows\\Fonts\\arial.ttf",
                 "C:\\Windows\\Fonts\\Calibri.ttf",
+                "C:\\Windows\\Fonts\\calibri.ttf",
+                "C:\\Windows\\Fonts\\segoeui.ttf",
+                "C:\\Windows\\Fonts\\Tahoma.ttf",
+                "C:\\Windows\\Fonts\\Verdana.ttf",
             ],
             "Darwin": [
                 "/System/Library/Fonts/Helvetica.ttc",

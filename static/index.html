@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LinkedIn AI Content Agent</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner { animation: spin 1s linear infinite; display: inline-block; }
+
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    .fade-in { animation: fadeIn 0.3s ease-out forwards; }
+
+    @keyframes pulse-ring {
+      0% { box-shadow: 0 0 0 0 rgba(0,119,181,0.4); }
+      70% { box-shadow: 0 0 0 8px rgba(0,119,181,0); }
+      100% { box-shadow: 0 0 0 0 rgba(0,119,181,0); }
+    }
+    .pulse-ring { animation: pulse-ring 1.5s ease-out infinite; }
+  </style>
+</head>
+<body class="min-h-screen bg-slate-50 text-slate-800 font-sans">
+
+  <!-- ── Header ──────────────────────────────────────────────────────────── -->
+  <header class="bg-[#0077B5] text-white shadow-md">
+    <div class="max-w-6xl mx-auto px-6 py-4 flex items-center gap-3">
+      <!-- LinkedIn-style icon -->
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-7 h-7">
+        <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 0 1-2.063-2.065 2.064 2.064 0 1 1 2.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
+      </svg>
+      <div>
+        <h1 class="text-lg font-bold leading-tight">LinkedIn AI Content Agent</h1>
+        <p class="text-xs text-blue-100 leading-none">Powered by LangGraph + GPT-4o</p>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── Main layout ─────────────────────────────────────────────────────── -->
+  <main class="max-w-6xl mx-auto px-6 py-8 grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
+
+    <!-- ── LEFT: Input form ──────────────────────────────────────────────── -->
+    <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 lg:sticky lg:top-8">
+      <h2 class="text-base font-semibold text-slate-700 mb-5 flex items-center gap-2">
+        <span class="inline-flex items-center justify-center w-6 h-6 rounded-full bg-[#0077B5] text-white text-xs font-bold">✎</span>
+        Create Your Post
+      </h2>
+
+      <form id="postForm" class="space-y-4">
+        <!-- Topic -->
+        <div>
+          <label for="topic" class="block text-sm font-medium text-slate-600 mb-1">
+            Topic <span class="text-red-400">*</span>
+          </label>
+          <input
+            id="topic"
+            type="text"
+            placeholder="e.g. The impact of AI on software development"
+            class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0077B5] focus:border-transparent placeholder:text-slate-400 transition"
+            required
+          />
+        </div>
+
+        <!-- Description / Context -->
+        <div>
+          <label for="userContext" class="block text-sm font-medium text-slate-600 mb-1">
+            Additional Context
+            <span class="text-slate-400 font-normal">(optional)</span>
+          </label>
+          <textarea
+            id="userContext"
+            rows="3"
+            placeholder="Key points, personal experience, or anything you'd like included..."
+            class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0077B5] focus:border-transparent placeholder:text-slate-400 resize-none transition"
+          ></textarea>
+        </div>
+
+        <!-- Post Format -->
+        <div>
+          <label class="block text-sm font-medium text-slate-600 mb-2">Post Format</label>
+          <div class="grid grid-cols-2 gap-2" id="formatSelector">
+            <label class="format-card cursor-pointer">
+              <input type="radio" name="postFormat" value="text" class="sr-only" checked />
+              <div class="format-card-inner rounded-lg border-2 border-slate-200 p-3 text-center hover:border-[#0077B5] transition">
+                <div class="text-xl mb-1">📝</div>
+                <div class="text-xs font-medium text-slate-700">Text Only</div>
+                <div class="text-xs text-slate-400 mt-0.5">Simple text post</div>
+              </div>
+            </label>
+            <label class="format-card cursor-pointer">
+              <input type="radio" name="postFormat" value="image" class="sr-only" />
+              <div class="format-card-inner rounded-lg border-2 border-slate-200 p-3 text-center hover:border-[#0077B5] transition">
+                <div class="text-xl mb-1">🖼️</div>
+                <div class="text-xs font-medium text-slate-700">AI Image</div>
+                <div class="text-xs text-slate-400 mt-0.5">Post with image</div>
+              </div>
+            </label>
+            <label class="format-card cursor-pointer">
+              <input type="radio" name="postFormat" value="flyer" class="sr-only" />
+              <div class="format-card-inner rounded-lg border-2 border-slate-200 p-3 text-center hover:border-[#0077B5] transition">
+                <div class="text-xl mb-1">🎨</div>
+                <div class="text-xs font-medium text-slate-700">Flyer</div>
+                <div class="text-xs text-slate-400 mt-0.5">Branded graphic</div>
+              </div>
+            </label>
+            <label class="format-card cursor-pointer">
+              <input type="radio" name="postFormat" value="carousel" class="sr-only" />
+              <div class="format-card-inner rounded-lg border-2 border-slate-200 p-3 text-center hover:border-[#0077B5] transition">
+                <div class="text-xl mb-1">📑</div>
+                <div class="text-xs font-medium text-slate-700">Carousel</div>
+                <div class="text-xs text-slate-400 mt-0.5">Multi-slide PDF</div>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <!-- Submit -->
+        <button
+          type="submit"
+          id="submitBtn"
+          class="w-full bg-[#0077B5] hover:bg-[#005f91] active:bg-[#004e7a] text-white font-semibold py-2.5 rounded-lg text-sm transition flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <span id="submitIcon">✨</span>
+          <span id="submitText">Generate Post</span>
+        </button>
+      </form>
+
+      <!-- Error -->
+      <div id="formError" class="hidden mt-3 text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2"></div>
+    </div>
+
+    <!-- ── RIGHT: Pipeline progress ──────────────────────────────────────── -->
+    <div class="space-y-4">
+
+      <!-- Progress card -->
+      <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
+        <h2 class="text-base font-semibold text-slate-700 mb-5 flex items-center gap-2">
+          <span class="inline-flex items-center justify-center w-6 h-6 rounded-full bg-slate-100 text-slate-500 text-xs font-bold">⚙</span>
+          Pipeline Progress
+        </h2>
+        <ol id="stepsList" class="space-y-3">
+          <!-- Steps injected by JS -->
+        </ol>
+        <div id="progressPlaceholder" class="text-sm text-slate-400 text-center py-4">
+          Fill in the form and click <strong>Generate Post</strong> to begin.
+        </div>
+      </div>
+
+      <!-- Review card (hidden until content is generated) -->
+      <div id="reviewCard" class="hidden bg-white rounded-2xl shadow-sm border-2 border-[#0077B5] p-6 fade-in">
+        <h2 class="text-base font-semibold text-[#0077B5] mb-4 flex items-center gap-2">
+          <span>👁</span> Review Generated Content
+        </h2>
+
+        <!-- Format badge -->
+        <div id="reviewFormat" class="inline-block text-xs font-semibold uppercase tracking-wide bg-blue-50 text-[#0077B5] rounded-full px-3 py-1 mb-4"></div>
+
+        <!-- Post text -->
+        <div class="mb-4">
+          <p class="text-xs font-medium text-slate-500 uppercase tracking-wide mb-1">Post Text</p>
+          <div id="reviewText" class="text-sm text-slate-700 bg-slate-50 rounded-lg p-3 whitespace-pre-wrap leading-relaxed max-h-60 overflow-y-auto border border-slate-100"></div>
+        </div>
+
+        <!-- Hashtags -->
+        <div id="reviewHashtagsWrap" class="mb-4 hidden">
+          <p class="text-xs font-medium text-slate-500 uppercase tracking-wide mb-1">Hashtags</p>
+          <div id="reviewHashtags" class="flex flex-wrap gap-1"></div>
+        </div>
+
+        <!-- Visual preview -->
+        <div id="reviewVisualWrap" class="mb-4 hidden">
+          <p class="text-xs font-medium text-slate-500 uppercase tracking-wide mb-1">Visual</p>
+          <img id="reviewVisualImg" src="" alt="Generated visual" class="rounded-lg max-h-48 border border-slate-200" />
+          <iframe id="reviewCarouselEmbed" src="" class="hidden w-full rounded-lg border border-slate-200" style="height:480px;"></iframe>
+          <a id="reviewVisualLink" href="#" target="_blank" class="text-xs text-[#0077B5] mt-1 inline-block">Open file ↗</a>
+        </div>
+
+        <!-- Action buttons -->
+        <div class="flex gap-3 flex-wrap">
+          <button
+            id="btnApprove"
+            class="flex-1 bg-green-600 hover:bg-green-700 active:bg-green-800 text-white font-semibold py-2.5 rounded-lg text-sm transition flex items-center justify-center gap-1.5"
+          >
+            <span>✓</span> Approve &amp; Publish
+          </button>
+          <button
+            id="btnRegenerate"
+            class="flex-1 bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-white font-semibold py-2.5 rounded-lg text-sm transition flex items-center justify-center gap-1.5"
+          >
+            <span>↺</span> Regenerate
+          </button>
+          <button
+            id="btnCancel"
+            class="px-4 bg-slate-200 hover:bg-slate-300 active:bg-slate-400 text-slate-700 font-semibold py-2.5 rounded-lg text-sm transition flex items-center justify-center gap-1.5"
+          >
+            ✕ Cancel
+          </button>
+        </div>
+      </div>
+
+      <!-- Result card -->
+      <div id="resultCard" class="hidden bg-white rounded-2xl shadow-sm border border-slate-200 p-6 fade-in">
+        <div id="resultIcon" class="text-4xl text-center mb-3"></div>
+        <p id="resultMessage" class="text-center font-semibold text-slate-700 text-sm"></p>
+        <p id="resultPostId" class="text-center text-xs text-slate-400 mt-1"></p>
+        <div class="text-center mt-4">
+          <button
+            id="btnReset"
+            class="bg-[#0077B5] hover:bg-[#005f91] text-white text-sm font-semibold px-6 py-2 rounded-lg transition"
+          >
+            Create Another Post
+          </button>
+        </div>
+      </div>
+
+    </div><!-- end right column -->
+  </main>
+
+  <!-- ── Scripts ─────────────────────────────────────────────────────────── -->
+  <script>
+    // ── Step definitions ──────────────────────────────────────────────────
+    const ALL_STEPS = [
+      { id: "retrieve", label: "Fetching LinkedIn history" },
+      { id: "tone",     label: "Analyzing writing tone" },
+      { id: "generate", label: "Generating AI content" },
+      { id: "visual",   label: "Creating visual" },
+      { id: "review",   label: "Awaiting your review" },
+      { id: "publish",  label: "Publishing to LinkedIn" },
+    ];
+
+    // ── State ──────────────────────────────────────────────────────────────
+    let currentSessionId = null;
+    let currentEventSource = null;
+
+    // ── Format card selection ──────────────────────────────────────────────
+    document.querySelectorAll('.format-card').forEach(label => {
+      const radio = label.querySelector('input[type=radio]');
+      const inner = label.querySelector('.format-card-inner');
+
+      function update() {
+        if (radio.checked) {
+          inner.classList.remove('border-slate-200');
+          inner.classList.add('border-[#0077B5]', 'bg-blue-50');
+        } else {
+          inner.classList.add('border-slate-200');
+          inner.classList.remove('border-[#0077B5]', 'bg-blue-50');
+        }
+      }
+      radio.addEventListener('change', () => {
+        document.querySelectorAll('.format-card input').forEach(r => {
+          r.closest('.format-card').querySelector('.format-card-inner').classList.add('border-slate-200');
+          r.closest('.format-card').querySelector('.format-card-inner').classList.remove('border-[#0077B5]', 'bg-blue-50');
+        });
+        update();
+      });
+      update();
+    });
+
+    // ── Render pipeline steps ──────────────────────────────────────────────
+    function renderSteps(format) {
+      const list = document.getElementById('stepsList');
+      const placeholder = document.getElementById('progressPlaceholder');
+      placeholder.classList.add('hidden');
+      list.innerHTML = '';
+
+      const steps = format === 'text'
+        ? ALL_STEPS.filter(s => s.id !== 'visual')
+        : ALL_STEPS;
+
+      steps.forEach((step, i) => {
+        const li = document.createElement('li');
+        li.id = `step-${step.id}`;
+        li.className = 'flex items-center gap-3';
+        li.innerHTML = `
+          <div class="step-icon w-8 h-8 rounded-full border-2 border-slate-200 flex items-center justify-center text-slate-400 text-xs font-bold flex-shrink-0 bg-white transition-all">
+            ${i + 1}
+          </div>
+          <div class="flex-1">
+            <p class="text-sm font-medium text-slate-500 step-label">${step.label}</p>
+          </div>
+          <div class="step-badge text-xs text-slate-400"></div>
+        `;
+        list.appendChild(li);
+      });
+    }
+
+    function setStepStatus(stepId, status) {
+      const li = document.getElementById(`step-${stepId}`);
+      if (!li) return;
+      const icon = li.querySelector('.step-icon');
+      const label = li.querySelector('.step-label');
+      const badge = li.querySelector('.step-badge');
+
+      icon.className = 'step-icon w-8 h-8 rounded-full border-2 flex items-center justify-center text-xs font-bold flex-shrink-0 bg-white transition-all';
+
+      if (status === 'running') {
+        icon.className += ' border-[#0077B5] text-[#0077B5] pulse-ring';
+        icon.innerHTML = `<span class="spinner">⟳</span>`;
+        label.className = 'text-sm font-semibold text-[#0077B5] step-label';
+        badge.textContent = 'Running…';
+        badge.className = 'step-badge text-xs text-[#0077B5]';
+      } else if (status === 'done') {
+        icon.className += ' border-green-500 bg-green-500 text-white';
+        icon.innerHTML = '✓';
+        label.className = 'text-sm font-medium text-slate-600 step-label';
+        badge.textContent = 'Done';
+        badge.className = 'step-badge text-xs text-green-500';
+      } else if (status === 'wait') {
+        icon.className += ' border-amber-400 text-amber-500 pulse-ring';
+        icon.innerHTML = '⏸';
+        label.className = 'text-sm font-semibold text-amber-600 step-label';
+        badge.textContent = 'Your turn';
+        badge.className = 'step-badge text-xs text-amber-500';
+      } else if (status === 'skipped') {
+        icon.className += ' border-slate-200 text-slate-300';
+        label.className = 'text-sm text-slate-400 step-label line-through';
+        badge.textContent = 'Skipped';
+        badge.className = 'step-badge text-xs text-slate-300';
+      }
+    }
+
+    // ── Form submission ────────────────────────────────────────────────────
+    document.getElementById('postForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+
+      const topic = document.getElementById('topic').value.trim();
+      const userContext = document.getElementById('userContext').value.trim();
+      const postFormat = document.querySelector('input[name="postFormat"]:checked').value;
+      const errorEl = document.getElementById('formError');
+
+      errorEl.classList.add('hidden');
+
+      if (!topic) {
+        errorEl.textContent = 'Please enter a topic.';
+        errorEl.classList.remove('hidden');
+        return;
+      }
+
+      // Disable form + update button
+      setFormDisabled(true);
+
+      // Reset UI
+      document.getElementById('reviewCard').classList.add('hidden');
+      document.getElementById('resultCard').classList.add('hidden');
+      renderSteps(postFormat);
+
+      // Start pipeline
+      try {
+        const resp = await fetch('/api/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ topic, user_context: userContext, post_format: postFormat }),
+        });
+        const data = await resp.json();
+        if (!resp.ok || data.error) {
+          showFormError(data.error || 'Failed to start pipeline.');
+          setFormDisabled(false);
+          return;
+        }
+        currentSessionId = data.session_id;
+        openEventStream(currentSessionId);
+      } catch (err) {
+        showFormError('Network error: ' + err.message);
+        setFormDisabled(false);
+      }
+    });
+
+    // ── SSE event stream ───────────────────────────────────────────────────
+    function openEventStream(sessionId) {
+      if (currentEventSource) {
+        currentEventSource.close();
+      }
+      currentEventSource = new EventSource(`/api/stream/${sessionId}`);
+
+      currentEventSource.onmessage = (e) => {
+        const event = JSON.parse(e.data);
+        handleEvent(event, sessionId);
+      };
+
+      currentEventSource.onerror = () => {
+        currentEventSource.close();
+      };
+    }
+
+    function handleEvent(event, sessionId) {
+      switch (event.type) {
+
+        case 'step_start':
+          setStepStatus(event.step, event.step === 'review' ? 'wait' : 'running');
+          break;
+
+        case 'step_done':
+          setStepStatus(event.step, 'done');
+          break;
+
+        case 'review':
+          showReviewPanel(event, sessionId);
+          break;
+
+        case 'complete':
+          currentEventSource && currentEventSource.close();
+          showResult(event);
+          setFormDisabled(false);
+          break;
+
+        case 'error':
+          currentEventSource && currentEventSource.close();
+          showFormError('Pipeline error: ' + event.message);
+          setFormDisabled(false);
+          break;
+
+        case 'done':
+          currentEventSource && currentEventSource.close();
+          break;
+      }
+    }
+
+    // ── Review panel ───────────────────────────────────────────────────────
+    function showReviewPanel(event, sessionId) {
+      const card = document.getElementById('reviewCard');
+
+      // Format badge
+      const fmtMap = { text: '📝 Text', image: '🖼️ Image', flyer: '🎨 Flyer', carousel: '📑 Carousel' };
+      document.getElementById('reviewFormat').textContent = fmtMap[event.post_format] || event.post_format;
+
+      // Post text
+      document.getElementById('reviewText').textContent = event.generated_text || '(no content)';
+
+      // Hashtags
+      const hashWrap = document.getElementById('reviewHashtagsWrap');
+      const hashEl = document.getElementById('reviewHashtags');
+      hashEl.innerHTML = '';
+      if (event.hashtags && event.hashtags.length) {
+        event.hashtags.forEach(tag => {
+          const span = document.createElement('span');
+          span.className = 'bg-blue-50 text-[#0077B5] text-xs rounded-full px-2.5 py-0.5 font-medium';
+          span.textContent = tag.startsWith('#') ? tag : '#' + tag;
+          hashEl.appendChild(span);
+        });
+        hashWrap.classList.remove('hidden');
+      } else {
+        hashWrap.classList.add('hidden');
+      }
+
+      // Visual
+      const visualWrap = document.getElementById('reviewVisualWrap');
+      const visualImg = document.getElementById('reviewVisualImg');
+      const carouselEmbed = document.getElementById('reviewCarouselEmbed');
+      const visualLink = document.getElementById('reviewVisualLink');
+      // Reset both elements first
+      visualImg.style.display = '';
+      visualImg.src = '';
+      carouselEmbed.src = '';
+      carouselEmbed.classList.add('hidden');
+      visualLink.textContent = 'Open file ↗';
+
+      const visualUrl = event.image_url || event.flyer_url;
+      if (visualUrl) {
+        visualImg.src = visualUrl;
+        visualLink.href = visualUrl;
+        visualWrap.classList.remove('hidden');
+      } else if (event.carousel_url) {
+        visualImg.style.display = 'none';
+        carouselEmbed.src = event.carousel_url;
+        carouselEmbed.classList.remove('hidden');
+        visualLink.href = event.carousel_url;
+        visualLink.textContent = '📥 Download PDF ↗';
+        visualWrap.classList.remove('hidden');
+      } else {
+        visualWrap.classList.add('hidden');
+      }
+
+      card.classList.remove('hidden');
+      card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+      // Wire up buttons
+      document.getElementById('btnApprove').onclick = () => submitReview(sessionId, 'approve');
+      document.getElementById('btnRegenerate').onclick = () => submitReview(sessionId, 'regenerate');
+      document.getElementById('btnCancel').onclick = () => submitReview(sessionId, 'cancel');
+    }
+
+    async function submitReview(sessionId, action) {
+      // Disable review buttons immediately
+      ['btnApprove', 'btnRegenerate', 'btnCancel'].forEach(id => {
+        document.getElementById(id).disabled = true;
+        document.getElementById(id).classList.add('opacity-50');
+      });
+
+      if (action === 'regenerate') {
+        document.getElementById('reviewCard').classList.add('hidden');
+      } else if (action === 'cancel' || action === 'approve') {
+        document.getElementById('reviewCard').classList.add('hidden');
+      }
+
+      await fetch(`/api/review/${sessionId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      });
+
+      // Re-enable buttons after POST
+      ['btnApprove', 'btnRegenerate', 'btnCancel'].forEach(id => {
+        document.getElementById(id).disabled = false;
+        document.getElementById(id).classList.remove('opacity-50');
+      });
+    }
+
+    // ── Result panel ───────────────────────────────────────────────────────
+    function showResult(event) {
+      document.getElementById('reviewCard').classList.add('hidden');
+      const card = document.getElementById('resultCard');
+      document.getElementById('resultIcon').textContent = event.success ? '🎉' : '📋';
+      document.getElementById('resultMessage').textContent = event.message || 'Done.';
+      document.getElementById('resultPostId').textContent = event.post_id ? `Post ID: ${event.post_id}` : '';
+      card.classList.remove('hidden');
+      card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+
+    // ── Helpers ────────────────────────────────────────────────────────────
+    function setFormDisabled(disabled) {
+      const btn = document.getElementById('submitBtn');
+      const icon = document.getElementById('submitIcon');
+      const text = document.getElementById('submitText');
+      btn.disabled = disabled;
+      if (disabled) {
+        icon.innerHTML = `<span class="spinner">⟳</span>`;
+        text.textContent = 'Running…';
+      } else {
+        icon.textContent = '✨';
+        text.textContent = 'Generate Post';
+      }
+      document.getElementById('topic').disabled = disabled;
+      document.getElementById('userContext').disabled = disabled;
+      document.querySelectorAll('input[name="postFormat"]').forEach(r => r.disabled = disabled);
+    }
+
+    function showFormError(msg) {
+      const el = document.getElementById('formError');
+      el.textContent = msg;
+      el.classList.remove('hidden');
+    }
+
+    // ── Reset ──────────────────────────────────────────────────────────────
+    document.getElementById('btnReset').addEventListener('click', () => {
+      document.getElementById('resultCard').classList.add('hidden');
+      document.getElementById('reviewCard').classList.add('hidden');
+      document.getElementById('stepsList').innerHTML = '';
+      document.getElementById('progressPlaceholder').classList.remove('hidden');
+      document.getElementById('formError').classList.add('hidden');
+      currentSessionId = null;
+    });
+  </script>
+</body>
+</html>
