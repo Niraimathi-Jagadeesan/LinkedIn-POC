@@ -43,6 +43,7 @@ class AgentState(TypedDict):
     user_context: str
     post_format: str          # PostFormat value string
     person_urn: str
+    carousel_image_mode: str  # "shared" | "per_slide"
 
     # Pipeline data
     last_post_text: str       # raw text of the most recent LinkedIn post
@@ -176,13 +177,24 @@ def create_visual(state: AgentState) -> AgentState:
             chunks = [" ". join(sentences[i: i + max(1, len(sentences) // 5)])
                       for i in range(0, len(sentences), max(1, len(sentences) // 5))]
             slides = (
-                [{"title": state["topic"], "body": _first_sentence(text, 120)}]
-                + [{"title": f"Key Point {i+1}", "body": c} for i, c in enumerate(chunks[:4])]
-                + [{"title": "What do you think?", "body": "Share your thoughts in the comments below."}]
+                [{"title": state["topic"], "body": _first_sentence(text, 120),
+                  "key_stat": "", "icon_concept": "", "layout": "cover",
+                  "slide_image_prompt": ""}]
+                + [{"title": f"Key Point {i+1}", "body": c,
+                    "key_stat": "", "icon_concept": "", "layout": "split-left",
+                    "slide_image_prompt": ""} for i, c in enumerate(chunks[:4])]
+                + [{"title": "What do you think?",
+                    "body": "Share your thoughts in the comments below.",
+                    "key_stat": "", "icon_concept": "", "layout": "cta",
+                    "slide_image_prompt": ""}]
             )
         # Use the post hook line on the carousel cover for immediate context
         post_hook = (state.get("hook_line") or _first_sentence(state.get("generated_text", ""), 120)).strip()
-        path = agent.generate_carousel(slides, state["topic"], post_hook=post_hook)
+        infographic_mode = (state.get("carousel_image_mode", "shared") == "per_slide")
+        path = agent.generate_carousel(
+            slides, state["topic"], post_hook=post_hook,
+            infographic_mode=infographic_mode,
+        )
         return {**state, "carousel_path": path}
 
     return state  # TEXT — nothing to generate

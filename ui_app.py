@@ -59,6 +59,7 @@ class StartRequest(BaseModel):
     topic: str
     user_context: str
     post_format: str
+    carousel_image_mode: str = "shared"   # "shared" | "per_slide"
 
 
 class ReviewRequest(BaseModel):
@@ -146,7 +147,8 @@ def _build_ui_graph(eq: queue.Queue, review_event: threading.Event, review_queue
     return wf.compile()
 
 
-def _run_pipeline(session_id: str, topic: str, user_context: str, post_format: str):
+def _run_pipeline(session_id: str, topic: str, user_context: str, post_format: str,
+                  carousel_image_mode: str = "shared"):
     """Runs the full pipeline in a background thread."""
     session = _sessions.get(session_id)
     if not session:
@@ -175,6 +177,7 @@ def _run_pipeline(session_id: str, topic: str, user_context: str, post_format: s
             "user_context": user_context,
             "post_format": post_format,
             "person_urn": person_urn,
+            "carousel_image_mode": carousel_image_mode,
             "past_posts_context": "",
             "last_post_text": "",
             "tone_profile": "",
@@ -239,7 +242,8 @@ async def start_pipeline(req: StartRequest):
 
     threading.Thread(
         target=_run_pipeline,
-        args=(session_id, req.topic.strip(), req.user_context.strip(), req.post_format),
+        args=(session_id, req.topic.strip(), req.user_context.strip(),
+              req.post_format, req.carousel_image_mode),
         daemon=True,
     ).start()
 

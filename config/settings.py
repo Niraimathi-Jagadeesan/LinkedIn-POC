@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     # LOGGED_IN   → any LinkedIn member, not indexed publicly
     post_visibility: str = "PUBLIC"
 
+    # Carousel image mode
+    # shared    → 1 AI background image shared across all slides (fast, cheap)
+    # per_slide → 1 AI infographic image generated per slide (rich, detailed)
+    carousel_image_mode: str = "shared"   # CAROUSEL_IMAGE_MODE=per_slide
+
     # Testing
     dry_run: bool = False         # DRY_RUN=true  → generate content but don't post
     mock_linkedin: bool = False   # MOCK_LINKEDIN=true → no LinkedIn credentials needed

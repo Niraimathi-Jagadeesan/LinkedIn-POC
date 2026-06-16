@@ -8,6 +8,7 @@ class PostFormat(str, Enum):
     IMAGE = "image"
     FLYER = "flyer"
     CAROUSEL = "carousel"
+    PPTX = "pptx"
 
 
 @dataclass

@@ -164,11 +164,52 @@ class ContentAgent:
             PostFormat.CAROUSEL: (
                 "Write a LinkedIn carousel post caption (300–500 characters) that teases "
                 "the value inside ('Swipe to discover...' style hook).\n"
-                "Also provide a 'slides' array of exactly 6 objects:\n"
-                "  - Slide 1: Cover — 'title': bold hook title, 'body': 1-line sub-headline\n"
-                "  - Slides 2-5: Content — 'title': clear point (max 7 words), "
-                "'body': 40-60 word elaboration with a concrete example or stat\n"
-                "  - Slide 6: CTA — 'title': call-to-action phrase, 'body': engaging closing question"
+                "Also provide a 'slides' array of exactly 6 objects.\n"
+                "Each slide object MUST have ALL of these keys:\n"
+                "  - 'title': clear point (max 7 words)\n"
+                "  - 'body': 40-60 word elaboration with a concrete example or stat\n"
+                "  - 'key_stat': a bold short fact, number, or outcome (max 8 words, e.g. '73% faster deployments', 'Saves 4 hrs/week'). Empty string if not applicable.\n"
+                "  - 'icon_concept': 1-3 words describing a relevant icon or symbol (e.g. 'cloud arrow', 'bar chart', 'rocket', 'shield check')\n"
+                "  - 'layout': one of: 'split-left' (text left, visual right) | 'stat-callout' (centered big stat) | 'cover' | 'cta'\n"
+                "  - 'slide_image_prompt': a vivid DALL-E prompt (40-60 words) describing an infographic-style illustration for this slide. "
+                "Focus on diagrams, icons, charts, architecture flows, or process visuals. No people. No text in image. Clean professional style.\n\n"
+                "Slide rules:\n"
+                "  - Slide 1: Cover — layout='cover', big hook title, 1-line sub-headline as body\n"
+                "  - Slides 2-5: Content — layout='split-left' or 'stat-callout'\n"
+                "  - Slide 6: CTA — layout='cta', call-to-action phrase, engaging closing question as body"
+            ),
+            PostFormat.PPTX: (
+                "Generate a professional PowerPoint deck structure for a LinkedIn audience.\n"
+                "Return the usual 'text' (LinkedIn caption, 300-500 chars) and 'hashtags'.\n"
+                "Also return a 'slides' array with EXACTLY these slide objects in order:\n\n"
+                "1. ONE slide with type='title':\n"
+                "   - title: Punchy deck title (max 8 words)\n"
+                "   - subtitle: One-line value statement (max 14 words)\n\n"
+                "2. ONE slide with type='overview':\n"
+                "   - title: Framework/approach name (e.g. 'Implementation Approach')\n"
+                "   - subtitle: Key message tagline\n"
+                "   - steps: Array of 5-7 process step objects, each with:\n"
+                "       * number: integer (1, 2, 3…)\n"
+                "       * heading: SHORT ALL-CAPS label, max 3 words (e.g. 'ASSESSMENT')\n"
+                "       * title: Step name, 3-5 words\n"
+                "       * bullets: 3-4 concise action-oriented bullet points (plain text, no dashes)\n"
+                "       * outcome: Short outcome phrase, 4-6 words\n\n"
+                "3. TWO TO FOUR slides with type='detail', one per key phase/topic:\n"
+                "   - section_number: integer matching the overview step this expands\n"
+                "   - title: Section heading\n"
+                "   - subtitle: Optional sub-heading (can be empty string)\n"
+                "   - bullets: 4-6 detailed bullet points (plain text, no markdown)\n"
+                "   - key_stat: One bold metric or outcome phrase (e.g. '4 Sprint Cycles', '30% faster') — empty string if none\n"
+                "   - outcome: Outcome label (4-6 words) — empty string if none\n"
+                "   - mermaid: Mermaid diagram code for this step's process flow.\n"
+                "     RULES: Use 'flowchart LR' syntax. 4-6 nodes max. Node labels 2-4 words.\n"
+                "     Example: 'flowchart LR\\n    A[Design] --> B[Build]\\n    B --> C[Test]\\n    C --> D[Release]'\n"
+                "     Keep the code simple and valid — no subgraphs, no special chars in labels.\n\n"
+                "4. ONE slide with type='summary':\n"
+                "   - title: 'Key Risks & Success Factors'\n"
+                "   - risks: 4-5 short risk phrases (plain text, no dashes)\n"
+                "   - success_factors: 4-5 short success factor phrases (plain text, no dashes)\n"
+                "   - tagline: One powerful closing statement (max 15 words)\n"
             ),
         }
 
@@ -220,6 +261,30 @@ Return ONLY a valid JSON object. No explanation outside the JSON."""
     def _normalise(raw: dict, topic: str) -> dict:
         """Ensure required keys are present with sensible fallbacks."""
         clean = ContentAgent._clean_text
+
+        raw_slides = raw.get("slides", [])
+
+        # PPTX slides have a 'type' field — pass them through without carousel normalisation
+        if raw_slides and isinstance(raw_slides[0], dict) and raw_slides[0].get("type"):
+            normalised_slides = raw_slides
+        else:
+            # Carousel slide normalisation — guarantee all infographic keys exist
+            normalised_slides = []
+            for i, s in enumerate(raw_slides):
+                layout_default = "cover" if i == 0 else ("cta" if i == len(raw_slides) - 1 else "split-left")
+                normalised_slides.append({
+                    "title": clean(s.get("title", f"Point {i}")),
+                    "body": clean(s.get("body", "")),
+                    "key_stat": clean(s.get("key_stat", "")),
+                    "icon_concept": s.get("icon_concept", ""),
+                    "layout": s.get("layout", layout_default),
+                    "slide_image_prompt": s.get(
+                        "slide_image_prompt",
+                        f"Professional infographic illustration for '{s.get('title', topic)}', "
+                        "clean diagram style, no text, corporate blue palette.",
+                    ),
+                })
+
         return {
             "text": clean(raw.get("text", "")),
             "hashtags": raw.get("hashtags", []),
@@ -230,5 +295,5 @@ Return ONLY a valid JSON object. No explanation outside the JSON."""
             "hook_line": clean(raw.get("hook_line", "")),
             "flyer_headline": clean(raw.get("flyer_headline", topic)),
             "flyer_subtitle": clean(raw.get("flyer_subtitle", "")),
-            "slides": raw.get("slides", []),
+            "slides": normalised_slides,
         }

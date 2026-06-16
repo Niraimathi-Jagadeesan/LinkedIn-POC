@@ -119,13 +119,17 @@ class DesignAgent:
         Generate via Pollinations.ai free tier (no key, no premium params).
         Falls back to a Pillow-rendered branded image on any HTTP error.
         """
-        encoded = urllib.parse.quote(
-            f"{image_prompt}. Professional LinkedIn graphic, clean modern design.",
-            safe="",
+        # Detect infographic context so the style suffix matches the content
+        is_infographic = any(w in image_prompt.lower() for w in
+                             ("infographic", "diagram", "chart", "vector", "icon", "flow", "architecture"))
+        suffix = (
+            "Professional infographic illustration, clean flat design, no text, no letters."
+            if is_infographic
+            else "Professional LinkedIn graphic, clean modern design."
         )
-        # Use minimal params — enhanced/nologo features now require payment
-        url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024"
-        print("  Requesting image from Pollinations.ai...")
+        encoded = urllib.parse.quote(f"{image_prompt}. {suffix}", safe="")
+        url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&seed={abs(hash(image_prompt)) % 9999}"
+        print(f"  Requesting image from Pollinations.ai ({'infographic' if is_infographic else 'standard'})...")
         try:
             resp = requests.get(url, timeout=90)
             resp.raise_for_status()
@@ -361,10 +365,460 @@ class DesignAgent:
         topic: str,
         post_hook: str = "",
         filename: str = "carousel.pdf",
+        infographic_mode: bool = False,
     ) -> str:
         """
-        AI-enhanced carousel (Option B):
-          1. One FLUX call → abstract background image
+        Route to infographic carousel (per-slide AI images) or classic shared-bg carousel.
+        infographic_mode=True → rich per-slide DALL-E / FLUX infographic images.
+        infographic_mode=False → single shared AI background (fast, free).
+        """
+        if infographic_mode:
+            return self._generate_infographic_carousel(slides, topic, post_hook, filename)
+        return self._generate_classic_carousel(slides, topic, post_hook, filename)
+
+    # ── Infographic carousel (AI-generated images + Pillow text overlay) ────────
+
+    def _generate_infographic_carousel(
+        self,
+        slides: List[dict],
+        topic: str,
+        post_hook: str = "",
+        filename: str = "carousel.pdf",
+    ) -> str:
+        """
+        Hybrid infographic carousel:
+          • Each slide (except CTA) requests one AI image via IMAGE_PROVIDER.
+            Set IMAGE_PROVIDER=openai + OPENAI_API_KEY for DALL-E 3 quality;
+            keeps pollinations/huggingface as free fallbacks.
+          • Cover:         full-bleed AI image + dark gradient panel on left for text
+          • Content slides: clean dark text panel (left 58%) + AI image panel (right 38%)
+          • Stat-callout:   AI image strip (top 36%) + circular gauge + body below
+          • CTA:            pure Pillow, no AI image needed
+          Falls back to Pillow-drawn bar chart when image generation fails.
+        """
+        from fpdf import FPDF
+        import math
+
+        W = H = 1080
+        PAD = 72
+
+        ACCENT_COLORS = [
+            (0,   119, 181),  # LinkedIn blue — cover
+            (0,   180, 140),  # teal          — slide 2
+            (130,  60, 210),  # purple        — slide 3
+            (0,   150, 210),  # sky           — slide 4
+            (210, 120,   0),  # amber         — slide 5
+            (220,  50,  80),  # coral         — CTA
+        ]
+        BG_COLORS = [
+            (8,  18, 55),
+            (5,  38, 45),
+            (20, 10, 48),
+            (5,  28, 52),
+            (42, 22,  5),
+            (48, 10, 22),
+        ]
+        WHITE = (255, 255, 255)
+        DIM   = (178, 208, 238)
+        PALE  = (110, 150, 195)
+
+        slide_paths: List[str] = []
+        n        = len(slides)
+        provider = getattr(self, "_image_provider", "pollinations")
+        print(f"  Building hybrid infographic carousel ({n} slides, '{provider}' images)...")
+
+        for i, slide in enumerate(slides):
+            accent   = ACCENT_COLORS[min(i, len(ACCENT_COLORS) - 1)]
+            bg       = BG_COLORS[min(i, len(BG_COLORS) - 1)]
+            is_cover = (i == 0)
+            is_cta   = (i == n - 1)
+            layout   = slide.get("layout", "split-left")
+
+            # ── 1. Generate AI image for this slide (skip CTA) ───────────────
+            ai_image = None
+            if not is_cta:
+                raw_hint   = slide.get("slide_image_prompt", "")
+                title_txt  = slide.get("title", topic)
+                img_prompt = (
+                    f"{raw_hint}. " if raw_hint else ""
+                ) + (
+                    f"Professional infographic illustration, topic: {title_txt}. "
+                    f"Theme: {topic}. Clean flat vector style, corporate design, "
+                    "no text, no words, no letters, high detail, 8K quality."
+                )
+                print(f"  [Slide {i+1}/{n}] Requesting AI image ({provider})...")
+                ai_tmp = self.generate_image(img_prompt, f"_infographic_ai_tmp_{i}.png")
+                try:
+                    ai_image = Image.open(ai_tmp).convert("RGB")
+                except Exception as exc:
+                    print(f"  [Slide {i+1}] Image load failed ({exc}), using Pillow fallback.")
+                finally:
+                    try:
+                        Path(ai_tmp).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+            # ── 2. Base canvas (gradient + dot grid) ─────────────────────────
+            img  = Image.new("RGB", (W, H), bg)
+            draw = ImageDraw.Draw(img)
+            for row in range(H):
+                t  = row / H
+                rc = tuple(max(0, int(bg[c] * (1.15 - t * 0.25))) for c in range(3))
+                draw.line([(0, row), (W, row)], fill=rc)
+            dc = tuple(min(255, c + 13) for c in bg)
+            for gy in range(0, H + 50, 50):
+                for gx in range(0, W + 50, 50):
+                    draw.ellipse([(gx - 1, gy - 1), (gx + 1, gy + 1)], fill=dc)
+
+            # ════════════════════════════════════════════════════════════════
+            if is_cover:
+                # Full-bleed AI image + left-side dark gradient for text ──────
+                if ai_image:
+                    img.paste(ai_image.resize((W, H), Image.LANCZOS), (0, 0))
+
+                # Dark gradient overlay: opaque on far left → transparent at 65%
+                TEXT_END = int(W * 0.65)
+                FEATHER  = 140
+                overlay  = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+                od       = ImageDraw.Draw(overlay)
+                for x in range(TEXT_END + FEATHER):
+                    if x <= TEXT_END - FEATHER:
+                        alpha = 215
+                    else:
+                        t = (x - (TEXT_END - FEATHER)) / FEATHER
+                        alpha = max(0, int(215 * (1.0 - t)))
+                    od.line([(x, 0), (x, H)], fill=(*bg, alpha))
+                img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+                draw = ImageDraw.Draw(img)
+
+                # Frame
+                draw.rectangle([(0, 0),     (W, 9)],    fill=accent)
+                draw.rectangle([(0, H - 6), (W, H)],    fill=accent)
+                draw.rectangle([(0, 9),     (6, H - 6)], fill=accent)
+                draw.text((W - PAD, 28), f"1 / {n}",
+                           font=self._font(22), fill=PALE, anchor="rs")
+
+                # Topic badge
+                tag   = "#" + self._ascii_tag(topic)
+                tb    = draw.textbbox((0, 0), tag, font=self._font(24))
+                tag_w = tb[2] - tb[0] + 36
+                draw.rounded_rectangle([(PAD, 28), (PAD + tag_w, 76)],
+                                        radius=24, fill=accent)
+                draw.text((PAD + 18, 35), tag, font=self._font(24), fill=WHITE)
+
+                # Large title
+                max_tw = TEXT_END - PAD - 40
+                y = self._draw_wrapped(draw, slide.get("title", topic),
+                                       self._font(82), WHITE, W,
+                                       PAD + 8, H // 3,
+                                       max_width=max_tw, align="left", line_gap=18)
+                draw.rectangle([(PAD + 8, y + 22), (PAD + 130, y + 30)], fill=accent)
+
+                sub = post_hook or slide.get("body", "")
+                if sub:
+                    self._draw_wrapped(draw, sub, self._font(30), DIM, W,
+                                       PAD + 8, y + 48,
+                                       max_width=max_tw, align="left", line_gap=10)
+
+                draw.text((TEXT_END - 20, H - PAD - 6), "Swipe to explore →",
+                           font=self._font(24), fill=accent, anchor="rs")
+
+            # ════════════════════════════════════════════════════════════════
+            elif is_cta:
+                # Pure Pillow CTA ─────────────────────────────────────────────
+                draw.rectangle([(0, 0),     (W, 9)],    fill=accent)
+                draw.rectangle([(0, H - 6), (W, H)],    fill=accent)
+                draw.rectangle([(0, 9),     (6, H - 6)], fill=accent)
+                draw.text((W - PAD, 28), f"{n} / {n}",
+                           font=self._font(22), fill=PALE, anchor="rs")
+
+                for ci, (cx_off, bright) in enumerate([(-90, 22), (-38, 32), (14, 45)]):
+                    ax = W - 200 + cx_off
+                    for seg in range(5):
+                        sc = tuple(min(255, c + bright + seg * 8) for c in bg)
+                        y1 = H - 130 - seg * 62
+                        draw.line([(ax, y1), (ax, y1 - 48)], fill=sc, width=4)
+                    draw.polygon([(ax-13, H-130-5*62), (ax+13, H-130-5*62),
+                                   (ax,   H-130-5*62-20)], fill=accent)
+
+                y = self._draw_wrapped(draw, slide.get("title", "Let's Connect"),
+                                       self._font(72), WHITE, W,
+                                       PAD + 8, H // 5,
+                                       max_width=W - 270, align="left", line_gap=14)
+                draw.rectangle([(PAD + 8, y + 18), (PAD + 110, y + 26)], fill=accent)
+                body = slide.get("body", "")
+                if body:
+                    self._draw_wrapped(draw, body, self._font(30), DIM, W,
+                                       PAD + 8, y + 44,
+                                       max_width=W - 270, align="left", line_gap=10)
+                btn_txt = "Follow for more →"
+                bb      = draw.textbbox((0, 0), btn_txt, font=self._font(30))
+                btn_w   = bb[2] - bb[0] + 64
+                bx      = (W - btn_w) // 2
+                draw.rounded_rectangle([(bx, H - 192), (bx + btn_w, H - 120)],
+                                        radius=38, fill=accent)
+                draw.text((bx + 32, H - 182), btn_txt, font=self._font(30), fill=WHITE)
+
+            # ════════════════════════════════════════════════════════════════
+            elif layout == "stat-callout":
+                # AI image strip (top) + circular gauge + body ────────────────
+                draw.rectangle([(0, 0),     (W, 9)],    fill=accent)
+                draw.rectangle([(0, H - 6), (W, H)],    fill=accent)
+                draw.rectangle([(0, 9),     (6, H - 6)], fill=accent)
+                draw.text((W - PAD, 28), f"{i+1} / {n}",
+                           font=self._font(22), fill=PALE, anchor="rs")
+
+                if ai_image:
+                    # Top image strip
+                    strip_h = int(H * 0.34)
+                    strip_w = W - PAD * 2
+                    strip   = ai_image.resize((strip_w, strip_h), Image.LANCZOS)
+                    mask    = Image.new("L", (strip_w, strip_h), 0)
+                    ImageDraw.Draw(mask).rounded_rectangle(
+                        [(0, 0), (strip_w - 1, strip_h - 1)], radius=18, fill=255)
+                    img.paste(strip, (PAD, PAD + 18), mask)
+                    ImageDraw.Draw(img).rounded_rectangle(
+                        [(PAD-2, PAD+16), (PAD+strip_w+2, PAD+18+strip_h+2)],
+                        radius=20, outline=accent, width=3)
+                    draw    = ImageDraw.Draw(img)
+                    text_y  = PAD + strip_h + 36
+                    gauge_cy = text_y + 48 + 170
+                else:
+                    text_y   = PAD + 18
+                    gauge_cy = H // 2 + 30
+
+                # Step badge + title
+                draw.ellipse([(PAD, text_y), (PAD + 54, text_y + 54)], fill=accent)
+                nb = draw.textbbox((0, 0), str(i), font=self._font(28))
+                draw.text((PAD + 27 - (nb[2]-nb[0])//2,
+                            text_y + 27 - (nb[3]-nb[1])//2 - 2),
+                           str(i), font=self._font(28), fill=WHITE)
+                self._draw_wrapped(draw, slide.get("title", ""),
+                                   self._font(46), WHITE, W,
+                                   PAD + 8, text_y + 62,
+                                   max_width=W - PAD * 2 - 60, align="left", line_gap=9)
+
+                # Compact circular gauge
+                R  = 155
+                cx = W // 2
+                gb = tuple(min(255, c + 22) for c in bg)
+                draw.arc([(cx-R, gauge_cy-R), (cx+R, gauge_cy+R)],
+                          start=-215, end=35, fill=gb, width=24)
+                draw.arc([(cx-R, gauge_cy-R), (cx+R, gauge_cy+R)],
+                          start=-215, end=-25, fill=accent, width=24)
+                draw.ellipse([(cx-R+28, gauge_cy-R+28), (cx+R-28, gauge_cy+R-28)],
+                              fill=tuple(min(255, c + 8) for c in bg))
+                key_stat = slide.get("key_stat", "")
+                if key_stat:
+                    sf = self._font(80)
+                    sb = draw.textbbox((0, 0), key_stat, font=sf)
+                    sx = cx - (sb[2]-sb[0]) // 2
+                    sy = gauge_cy - (sb[3]-sb[1]) // 2 - 8
+                    draw.text((sx+3, sy+3), key_stat, font=sf,
+                               fill=tuple(max(0, c-10) for c in bg))
+                    draw.text((sx, sy), key_stat, font=sf, fill=WHITE)
+                body = slide.get("body", "")
+                if body:
+                    self._draw_wrapped(draw, body, self._font(26), DIM, W,
+                                       PAD + 8, gauge_cy + R + 22,
+                                       max_width=W - PAD * 2, align="left", line_gap=8)
+
+            # ════════════════════════════════════════════════════════════════
+            else:
+                # Content slide: text left panel + AI image right panel ───────
+                VIZ_X  = int(W * 0.60)
+                TEXT_W = VIZ_X - PAD - 20
+
+                draw.rectangle([(0, 0),     (W, 9)],    fill=accent)
+                draw.rectangle([(0, H - 6), (W, H)],    fill=accent)
+                draw.rectangle([(0, 9),     (6, H - 6)], fill=accent)
+                draw.text((W - PAD, 28), f"{i+1} / {n}",
+                           font=self._font(22), fill=PALE, anchor="rs")
+
+                # Step badge
+                draw.ellipse([(PAD, PAD + 4), (PAD + 60, PAD + 64)], fill=accent)
+                nb = draw.textbbox((0, 0), str(i), font=self._font(30))
+                draw.text((PAD + 30 - (nb[2]-nb[0])//2,
+                            PAD + 32 - (nb[3]-nb[1])//2 - 2),
+                           str(i), font=self._font(30), fill=WHITE)
+
+                # Title
+                y = self._draw_wrapped(draw, slide.get("title", ""),
+                                       self._font(52), WHITE, W,
+                                       PAD + 8, PAD * 2 + 14,
+                                       max_width=TEXT_W, align="left", line_gap=11)
+                draw.rectangle([(PAD + 8, y + 14), (PAD + 80, y + 20)], fill=accent)
+                y += 36
+
+                # Key-stat callout box
+                key_stat = slide.get("key_stat", "")
+                if key_stat:
+                    sf  = self._font(42)
+                    sb  = draw.textbbox((0, 0), key_stat, font=sf)
+                    kx1 = PAD + 8
+                    kx2 = min(kx1 + (sb[2]-sb[0]) + 48, VIZ_X - 20)
+                    ky2 = y + 76
+                    draw.rounded_rectangle([(kx1+4, y+4), (kx2+4, ky2+4)], radius=14,
+                                            fill=tuple(max(0, c-8) for c in bg))
+                    draw.rounded_rectangle([(kx1, y), (kx2, ky2)],
+                                            radius=14, fill=accent)
+                    draw.text((kx1 + 20, y + 16), key_stat, font=sf, fill=WHITE)
+                    y = ky2 + 28
+
+                body = slide.get("body", "")
+                if body:
+                    self._draw_wrapped(draw, body, self._font(27), DIM, W,
+                                       PAD + 8, y,
+                                       max_width=TEXT_W, align="left", line_gap=9)
+
+                # Right panel: AI image (with rounded corners) or bar-chart fallback
+                px = VIZ_X + 10
+                py = PAD + 18
+                pw = W - px - PAD + 8
+                ph = H - py - PAD - 16
+
+                if ai_image:
+                    panel = ai_image.resize((pw, ph), Image.LANCZOS)
+                    mask  = Image.new("L", (pw, ph), 0)
+                    ImageDraw.Draw(mask).rounded_rectangle(
+                        [(0, 0), (pw - 1, ph - 1)], radius=22, fill=255)
+                    img.paste(panel, (px, py), mask)
+                    # Accent border around image panel
+                    ImageDraw.Draw(img).rounded_rectangle(
+                        [(px-3, py-3), (px+pw+3, py+ph+3)],
+                        radius=25, outline=accent, width=3)
+                    draw = ImageDraw.Draw(img)
+                else:
+                    # Fallback: horizontal bar chart
+                    bar_labels = ["Q1", "Q2", "Q3", "Q4"]
+                    bar_vals   = [0.80, 0.55, 0.72, 0.90]
+                    bh         = 30
+                    bgap       = 52
+                    max_bw     = pw
+                    bt         = tuple(min(255, c + 18) for c in bg)
+                    by0        = py + (ph - (4 * bh + 3 * bgap)) // 2
+                    for bi, bv in enumerate(bar_vals):
+                        by  = by0 + bi * (bh + bgap)
+                        bw  = int(max_bw * bv)
+                        draw.rounded_rectangle([(px, by), (px+max_bw, by+bh)],
+                                                radius=7, fill=bt)
+                        draw.rounded_rectangle([(px, by), (px+bw, by+bh)],
+                                                radius=7, fill=accent)
+                        draw.text((px-10, by+bh//2), bar_labels[bi],
+                                   font=self._font(20), fill=PALE, anchor="rm")
+                        draw.ellipse([(px+bw-7, by+bh//2-7),
+                                       (px+bw+7, by+bh//2+7)], fill=WHITE)
+
+                # Progress bar
+                total_c = max(n - 2, 1)
+                prog    = max(0.05, (i - 1) / total_c)
+                bar_y2  = H - 52
+                pw2     = W - PAD * 2 - 20
+                pt      = tuple(min(255, c + 22) for c in bg)
+                draw.rounded_rectangle([(PAD+8, bar_y2), (PAD+8+pw2, bar_y2+7)],
+                                        radius=4, fill=pt)
+                draw.rounded_rectangle([(PAD+8, bar_y2), (PAD+8+int(pw2*prog), bar_y2+7)],
+                                        radius=4, fill=accent)
+
+            # ── Save slide PNG ────────────────────────────────────────────────
+            out_slide = self._out / f"_infographic_slide_{i}.png"
+            img.save(str(out_slide), "PNG")
+            slide_paths.append(str(out_slide))
+
+        # ── Combine all slides into PDF ───────────────────────────────────────
+        pdf = FPDF(unit="mm", format=(210, 210))
+        for sp in slide_paths:
+            pdf.add_page()
+            pdf.image(sp, x=0, y=0, w=210, h=210)
+
+        out_path = self._out / filename
+        pdf.output(str(out_path))
+
+        for sp in slide_paths:
+            Path(sp).unlink(missing_ok=True)
+
+        print(f"  Hybrid carousel saved: {out_path}")
+        return str(out_path)
+
+    def _build_infographic_prompt(self, slide: dict, topic: str, accent_name: str) -> str:
+        """
+        Build a detailed 300-400 word DALL-E / image generation prompt that describes
+        a professional infographic illustration tailored to the slide's content.
+        """
+        title      = slide.get("title", topic)
+        body       = slide.get("body", "")
+        key_stat   = slide.get("key_stat", "")
+        icon       = slide.get("icon_concept", "data flow network")
+        layout     = slide.get("layout", "split-left")
+        base_hint  = slide.get("slide_image_prompt", "")
+
+        # Layout-specific visual language
+        if layout == "cover":
+            layout_desc  = "panoramic hero layout — large central focal element surrounded by radiating geometric patterns filling the full frame"
+            visual_focus = "bold central abstract icon or emblem with radiating connection lines, surrounded by layered hexagonal or circular frames"
+        elif layout == "stat-callout":
+            layout_desc  = "centered data-visualization layout dominated by a large circular gauge or radial progress chart"
+            visual_focus = "circular arc progress gauge, radial segments, concentric rings, abstract metric dial with tick marks"
+        elif layout == "cta":
+            layout_desc  = "dynamic forward-motion layout with directional flow elements converging toward center"
+            visual_focus = "upward-trending arrow clusters, converging network paths, forward-motion abstract shapes"
+        else:
+            layout_desc  = "structured information hierarchy layout — upper area has a bold visual anchor element, lower two-thirds is clear dark gradient for text"
+            visual_focus = "abstract process flow diagram with connected rounded-rectangle nodes, arrows between steps, layered depth"
+
+        stat_clause = (
+            f"Abstract visual representation of the key metric '{key_stat}' "
+            f"— suggest scale and achievement through proportional shapes and gauge elements. "
+            if key_stat else ""
+        )
+        hint_clause = f"{base_hint}. " if base_hint else ""
+
+        prompt = (
+            f"Professional LinkedIn business infographic illustration. "
+            f"Topic: {title}. Context: {body[:140] if body else topic}. "
+            f"{hint_clause}"
+            f"Visual composition: {layout_desc}. "
+            f"Primary visual element: {visual_focus}, representing '{icon}' concept. "
+            f"{stat_clause}"
+            f"Detailed design specifications: "
+            f"Background — deep dark navy blue (#0B1640) fading to dark charcoal in corners, "
+            f"creating a premium dark corporate gradient. "
+            f"Accent color — {accent_name} used for primary shapes, icon outlines, connecting arrows, "
+            f"and highlight points; renders as bright vivid color against the dark background. "
+            f"Supporting elements — soft blue-grey (#3A5A8A) for secondary geometric shapes; "
+            f"pure white dots and fine lines for detail accents. "
+            f"Texture — subtle diagonal dot-grid pattern at 5% opacity overlaid on background for professional depth; "
+            f"faint diagonal parallel lines in background suggesting motion and dynamism. "
+            f"Specific visual components to include: "
+            f"(1) Large abstract {icon} symbol rendered in clean flat {accent_name} vector lines, center-weighted; "
+            f"(2) Three to five connected rounded-rectangle or hexagonal information nodes arranged in logical flow; "
+            f"(3) Smooth curved arrows or dotted connector lines linking the nodes in {accent_name}; "
+            f"(4) Subtle radial glow or light-bloom behind the central element in {accent_name} at low opacity; "
+            f"(5) Small decorative micro-icons (circuit nodes, data points, small arrows) scattered in background; "
+            f"(6) Bottom third of image significantly darker (near black overlay) to ensure text overlay readability; "
+            f"(7) Thin {accent_name} accent line along top edge and bottom edge of the image frame. "
+            f"Composition rule: main visual weight concentrated in upper 60% of image; "
+            f"lower 40% transitions to very dark gradient. "
+            f"Quality targets: photorealistic render quality, 4K-level detail, clean vector aesthetic, "
+            f"suitable for premium LinkedIn professional content, no noise or artifacts. "
+            f"ABSOLUTE CONSTRAINT: Zero text, zero words, zero letters, zero numbers, zero characters "
+            f"anywhere in the image. Purely abstract visual and graphical elements only."
+        )
+        return prompt
+
+
+    # ── Classic carousel (shared background) ─────────────────────────────────
+
+    def _generate_classic_carousel(
+        self,
+        slides: List[dict],
+        topic: str,
+        post_hook: str = "",
+        filename: str = "carousel.pdf",
+    ) -> str:
+        """
+        Original shared-background carousel:
+          1. One FLUX call -> abstract background image
           2. Each slide reuses that background with a unique color tint overlay
           3. Pillow draws slide number, title, divider, body text on top
           4. All slides merged into a PDF
@@ -627,7 +1081,6 @@ class DesignAgent:
 
     # ── Utilities ─────────────────────────────────────────────────────────────
 
-    @staticmethod
     @staticmethod
     def _ascii_tag(text: str, max_chars: int = 28) -> str:
         """
