@@ -1,6 +1,6 @@
 """
 Content Agent — generates LinkedIn post text, hashtags, and visual prompts.
-Supports multiple LLM providers: OpenAI, Groq (free), Ollama (local).
+Supports multiple LLM providers: OpenAI, Groq (free), Ollama (local), Gemini.
 """
 
 import json
@@ -15,7 +15,10 @@ def _build_llm_client(settings) -> tuple["OpenAI", str]:
     """
     Return (OpenAI-compatible client, model name) for the configured provider.
     Groq and Ollama both expose an OpenAI-compatible REST API.
+    Returns (None, model_name) when provider is 'gemini' — Gemini uses its own SDK.
     """
+    if settings.llm_provider == "gemini":
+        return None, settings.llm_model or "gemini-1.5-pro"
     if settings.llm_provider == "groq":
         return (
             OpenAI(
@@ -51,8 +54,14 @@ class ContentAgent:
         "6. Build to a clear takeaway or lesson.\n"
         "7. End with a genuine call-to-action (question, challenge, or invitation to comment).\n"
         "8. Never use corporate buzzwords like 'leverage', 'synergy', 'circle back'.\n"
-        "9. NEVER use markdown formatting: no **bold**, no ##headings, no bullet dashes (-), "
-        "no backticks. Plain text only. Use line breaks (\\n) for structure.\n"
+        "9. Structure every post as a LinkedIn article with clear visual hierarchy:\n"
+        "   • Open with a ONE-LINE HOOK (no heading, just a bold statement or question).\n"
+        "   • Follow with 3-4 section blocks. Each block starts with a SHORT HEADING written\n"
+        "     in ALL CAPS on its own line (e.g. THE PROBLEM  or  WHY THIS MATTERS).\n"
+        "   • Under each heading write 2-3 short punchy sentences as a paragraph.\n"
+        "   • End with a CTA paragraph (no heading needed).\n"
+        "   • Separate every section and heading with a blank line (\\n\\n).\n"
+        "   • NEVER use markdown: no **bold**, no ## symbols, no - dashes, no backticks.\n"
         "10. Study the user's past posts to mirror their vocabulary and voice.\n"
         "Output ONLY valid JSON — no markdown fences, no extra commentary."
     )
@@ -61,6 +70,19 @@ class ContentAgent:
         settings = get_settings()
         self._client, self._model = _build_llm_client(settings)
         self._provider = settings.llm_provider
+        # Gemini client — lazy-initialised only when provider == "gemini"
+        self._gemini_client = None
+        self._gemini_model_name = None
+        if self._provider == "gemini":
+            self._gemini_client, self._gemini_model_name = self._init_gemini(settings)
+
+    def _init_gemini(self, settings):
+        """Initialise the Gemini client using the new google-genai SDK."""
+        from google import genai
+        from google.genai import types
+        client = genai.Client(api_key=settings.gemini_api_key)
+        model_name = self._model or "gemini-1.5-pro"
+        return client, model_name
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -71,6 +93,35 @@ class ContentAgent:
         """
         if not post_text.strip():
             return "No previous post available — use a confident, direct, professional tone with short punchy sentences."
+
+        user_content = (
+            f"Analyze the tone and style of this LinkedIn post:\n\n{post_text}\n\n"
+            "Provide a concise profile covering these 7 dimensions (one line each):\n"
+            "1. Tone: (e.g., motivational, analytical, conversational, authoritative)\n"
+            "2. Sentence structure: (e.g., short punchy, longer narrative, mixed)\n"
+            "3. Vocabulary: (e.g., simple/accessible, technical, inspirational, jargon-free)\n"
+            "4. Formatting: (e.g., numbered lists, bullet points, plain paragraphs, emoji usage)\n"
+            "5. Hook style: (e.g., bold statement, open question, surprising statistic)\n"
+            "6. CTA style: (e.g., open reflective question, direct challenge, community invitation)\n"
+            "7. Visual/design mood: (e.g., bold energetic, clean minimalist, warm professional)"
+        )
+
+        if self._provider == "gemini":
+            from google.genai import types
+            response = self._gemini_client.models.generate_content(
+                model=self._gemini_model_name,
+                contents=user_content,
+                config=types.GenerateContentConfig(
+                    system_instruction=(
+                        "You are an expert writing coach. Analyze the LinkedIn post provided "
+                        "and extract a precise tone and style profile. Be specific and actionable "
+                        "— this profile will be used to write a new post that matches the author's voice exactly."
+                    ),
+                    temperature=0.3,
+                ),
+            )
+            return response.text.strip()
+
         response = self._client.chat.completions.create(
             model=self._model,
             messages=[
@@ -82,20 +133,7 @@ class ContentAgent:
                         "— this profile will be used to write a new post that matches the author's voice exactly."
                     ),
                 },
-                {
-                    "role": "user",
-                    "content": (
-                        f"Analyze the tone and style of this LinkedIn post:\n\n{post_text}\n\n"
-                        "Provide a concise profile covering these 7 dimensions (one line each):\n"
-                        "1. Tone: (e.g., motivational, analytical, conversational, authoritative)\n"
-                        "2. Sentence structure: (e.g., short punchy, longer narrative, mixed)\n"
-                        "3. Vocabulary: (e.g., simple/accessible, technical, inspirational, jargon-free)\n"
-                        "4. Formatting: (e.g., numbered lists, bullet points, plain paragraphs, emoji usage)\n"
-                        "5. Hook style: (e.g., bold statement, open question, surprising statistic)\n"
-                        "6. CTA style: (e.g., open reflective question, direct challenge, community invitation)\n"
-                        "7. Visual/design mood: (e.g., bold energetic, clean minimalist, warm professional)"
-                    ),
-                },
+                {"role": "user", "content": user_content},
             ],
             temperature=0.3,
         )
@@ -117,6 +155,28 @@ class ContentAgent:
         user_prompt = self._build_prompt(
             topic, user_context, tone_profile, post_format
         )
+
+        if self._provider == "gemini":
+            from google.genai import types
+            response = self._gemini_client.models.generate_content(
+                model=self._gemini_model_name,
+                contents=user_prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=ContentAgent._SYSTEM_PROMPT,
+                    response_mime_type="application/json",
+                    temperature=0.7,
+                ),
+            )
+            raw_text = response.text.strip()
+            # Strip any accidental ```json fences Gemini may still emit
+            if raw_text.startswith("```"):
+                raw_text = raw_text.split("```", 2)[1]
+                if raw_text.startswith("json"):
+                    raw_text = raw_text[4:]
+                raw_text = raw_text.rsplit("```", 1)[0]
+            result = json.loads(raw_text)
+            return self._normalise(result, topic)
+
         response = self._client.chat.completions.create(
             model=self._model,
             messages=[
@@ -140,30 +200,53 @@ class ContentAgent:
     ) -> str:
         format_instructions = {
             PostFormat.TEXT: (
-                "Write a compelling LinkedIn text post (1 000–1 500 characters).\n"
-                "Structure: Hook (1 line) → Context/Story (3-5 short paragraphs) → "
-                "Key insight or list of 3-5 takeaways → Strong CTA question.\n"
-                "Use blank lines between every paragraph. Use emojis sparingly (1-2 max) "
-                "only where they genuinely add clarity."
+                "Write a 300–400 word LinkedIn article-style post.\n"
+                "Structure (use these EXACT section labels, written in ALL CAPS):\n"
+                "  Line 1: Powerful HOOK sentence — stops the scroll, no heading.\n"
+                "  [blank line]\n"
+                "  ALL-CAPS HEADING (e.g. THE PROBLEM or THE REALITY)\n"
+                "  2-3 punchy sentences.\n"
+                "  [blank line]\n"
+                "  ALL-CAPS HEADING (e.g. WHAT CHANGES WITH AI or THE TURNING POINT)\n"
+                "  2-3 punchy sentences.\n"
+                "  [blank line]\n"
+                "  ALL-CAPS HEADING (e.g. HOW IT WORKS or THE APPROACH)\n"
+                "  2-3 punchy sentences with a concrete example or stat.\n"
+                "  [blank line]\n"
+                "  ALL-CAPS HEADING (e.g. THE BOTTOM LINE or KEY TAKEAWAY)\n"
+                "  2-3 punchy sentences.\n"
+                "  [blank line]\n"
+                "  CTA paragraph — end with a direct question to the reader.\n"
+                "Emojis optional (1-2 max). Blank lines between every section."
             ),
             PostFormat.IMAGE: (
-                "Write a full LinkedIn post to accompany an image (800–1 200 characters).\n"
-                "Structure: Powerful hook (1 bold line) → Story or insight (3-4 short paragraphs) "
-                "→ 3-5 key takeaways or bullet points → CTA question.\n"
-                "The post must work as a standalone read even without the image.\n"
+                "Write a 300–400 word LinkedIn article-style post to accompany an image.\n"
+                "Structure (ALL-CAPS headings, blank lines between sections):\n"
+                "  Line 1: Powerful HOOK sentence.\n"
+                "  3-4 sections: each with an ALL-CAPS heading on its own line,\n"
+                "  followed by 2-3 punchy sentence paragraphs.\n"
+                "  Final section: CTA question.\n"
+                "The post must stand alone without the image.\n"
                 "Also provide 'hook_line': the very first sentence only (max 12 words), "
-                "used as a text overlay on the image."
+                "used as overlay text on the image."
             ),
             PostFormat.FLYER: (
-                "Write a LinkedIn flyer post caption (300–500 characters).\n"
-                "Structure: Hook → 1-2 value sentences → CTA.\n"
+                "Write a 300–400 word LinkedIn article-style post caption for a flyer.\n"
+                "Structure (ALL-CAPS headings, blank lines between sections):\n"
+                "  Line 1: Powerful HOOK sentence.\n"
+                "  3-4 sections: ALL-CAPS heading + 2-3 sentence paragraph each.\n"
+                "  Final section: CTA question.\n"
                 "Also provide:\n"
                 "- 'flyer_headline': punchy headline max 8 words (ALL CAPS impact phrase)\n"
                 "- 'flyer_subtitle': supporting line max 15 words that expands on the headline"
             ),
             PostFormat.CAROUSEL: (
-                "Write a LinkedIn carousel post caption (300–500 characters) that teases "
-                "the value inside ('Swipe to discover...' style hook).\n"
+                "Write a 300–400 word LinkedIn article-style post caption that teases the carousel.\n"
+                "Structure (ALL-CAPS headings, blank lines between sections):\n"
+                "  Line 1: Hook sentence in 'Swipe to discover...' style — no heading.\n"
+                "  3 sections: ALL-CAPS heading + 2-3 sentence paragraph each.\n"
+                "  Final section: CTA question.\n"
+                "Blank lines between every section.\n"
                 "Also provide a 'slides' array of exactly 6 objects.\n"
                 "Each slide object MUST have ALL of these keys:\n"
                 "  - 'title': clear point (max 7 words)\n"
@@ -247,8 +330,10 @@ Return ONLY a valid JSON object. No explanation outside the JSON."""
         import re
         # Remove **bold** and *italic*
         text = re.sub(r'\*{1,3}(.*?)\*{1,3}', r'\1', text)
-        # Remove ##headings
-        text = re.sub(r'^#{1,6}\s*', '', text, flags=re.MULTILINE)
+        # Convert ##Heading markers to ALL-CAPS plain text for LinkedIn
+        text = re.sub(r'^#{1,6}\s+(.+)$', lambda m: m.group(1).upper(), text, flags=re.MULTILINE)
+        # Strip any bare # symbols left alone on a line
+        text = re.sub(r'^#+\s*$', '', text, flags=re.MULTILINE)
         # Remove backticks
         text = re.sub(r'`+', '', text)
         # Convert markdown bullet dashes at line start to a clean bullet

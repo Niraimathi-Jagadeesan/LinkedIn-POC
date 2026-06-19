@@ -21,9 +21,12 @@ class Settings(BaseSettings):
     # Ollama (local, fully offline — https://ollama.com)
     ollama_base_url: str = "http://localhost:11434/v1"
 
+    # Google Gemini (https://aistudio.google.com/app/apikey)
+    gemini_api_key: str = ""
+
     # Provider selection
-    llm_provider: str = "openai"      # openai | groq | ollama
-    image_provider: str = "openai"    # openai | huggingface | pollinations
+    llm_provider: str = "openai"      # openai | groq | ollama | gemini
+    image_provider: str = "openai"    # openai | huggingface | pollinations | gemini
     embedding_provider: str = "openai" # openai | local
 
     # Agent config

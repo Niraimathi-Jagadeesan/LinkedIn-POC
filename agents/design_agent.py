@@ -40,6 +40,9 @@ class DesignAgent:
         self._image_provider = settings.image_provider
         if settings.image_provider == "openai":
             self._client = OpenAI(api_key=settings.openai_api_key)
+        if settings.image_provider == "gemini":
+            from google import genai
+            self._gemini_client = genai.Client(api_key=settings.gemini_api_key)
         self._image_model = settings.image_model
         self._image_size = settings.image_size
         self._out = Path("./data/outputs")
@@ -51,11 +54,40 @@ class DesignAgent:
         self, image_prompt: str, filename: str = "post_image.png"
     ) -> str:
         """Generate a LinkedIn-ready image and save it to disk."""
+        if self._image_provider == "gemini":
+            return self._generate_image_gemini_imagen(image_prompt, filename)
         if self._image_provider == "huggingface":
             return self._generate_image_hf(image_prompt, filename)
         if self._image_provider == "pollinations":
             return self._generate_image_pollinations(image_prompt, filename)
         return self._generate_image_openai(image_prompt, filename)
+
+    def _generate_image_gemini_imagen(self, image_prompt: str, filename: str) -> str:
+        """
+        Generate via Google Gemini Imagen 3 — produces high-quality infographic images
+        that can accurately render text, charts, icons, and structured layouts.
+        Falls back to Pillow-rendered image on any error.
+        """
+        try:
+            result = self._gemini_client.models.generate_images(
+                model="imagen-4.0-generate-001",
+                prompt=image_prompt,
+                config={
+                    "number_of_images": 1,
+                    "aspect_ratio": "1:1",
+                    "safety_filter_level": "block_low_and_above",
+                    "person_generation": "dont_allow",
+                },
+            )
+            if result.generated_images:
+                out_path = self._out / filename
+                result.generated_images[0].image.save(str(out_path))
+                print(f"  Gemini Imagen 3 image saved: {out_path}")
+                return str(out_path)
+            raise ValueError("No images returned from Gemini Imagen")
+        except Exception as exc:
+            print(f"  [WARN] Gemini Imagen generation failed ({exc}). Falling back to local image.")
+            return self._generate_image_pillow(image_prompt, filename)
 
     def _generate_image_hf(self, image_prompt: str, filename: str) -> str:
         """
@@ -368,13 +400,685 @@ class DesignAgent:
         infographic_mode: bool = False,
     ) -> str:
         """
-        Route to infographic carousel (per-slide AI images) or classic shared-bg carousel.
-        infographic_mode=True → rich per-slide DALL-E / FLUX infographic images.
-        infographic_mode=False → single shared AI background (fast, free).
+        Route to the appropriate carousel renderer based on image provider:
+          gemini          → Gemini Imagen 3 full-infographic slides (text baked in, no overlay)
+          infographic_mode → Hybrid per-slide AI images + Pillow text
+          default          → Classic shared-background carousel
         """
+        if self._image_provider == "gemini":
+            return self._generate_gemini_carousel(slides, topic, post_hook, filename)
         if infographic_mode:
             return self._generate_infographic_carousel(slides, topic, post_hook, filename)
         return self._generate_classic_carousel(slides, topic, post_hook, filename)
+
+    # ── AI Infographic carousel (Gemini HTML → Edge headless screenshot) ────────
+
+    def _generate_gemini_carousel(
+        self,
+        slides: List[dict],
+        topic: str,
+        post_hook: str = "",
+        filename: str = "carousel.pdf",
+    ) -> str:
+        """
+        Per-slide flow:
+          1. Gemini LLM expands content to 300-400 words (heading + bullets).
+          2. Gemini generates a complete self-contained HTML/CSS infographic slide
+             (white background, dark navy headers, numbered steps — ASG/Azure style).
+          3. Edge headless browser screenshots the HTML at 1080×1080 → PNG.
+          Fallback: Pollinations.ai image if HTML/Edge path fails.
+          All slides assembled into PDF — NO Pillow text overlay at any point.
+        """
+        from fpdf import FPDF
+
+        n = len(slides)
+        slide_paths: List[str] = []
+
+        print(f"  Building AI infographic carousel ({n} slides)...")
+
+        # ── Step 1: Batch-expand ALL slide content in ONE Gemini call ────────
+        print(f"  Step 1 — Batch-expanding content for all {n} slides (1 Gemini call)...")
+        all_expanded = self._expand_all_slides_batch(slides, topic, post_hook)
+
+        for i, slide in enumerate(slides):
+            img_filename = f"_ai_slide_{i}.png"
+            img_path = None
+            expanded = (
+                all_expanded.get(i)
+                or f"# {slide.get('title', topic)}\n\n{slide.get('body', '')}"
+            )
+
+            # ── Step 2+3: Gemini HTML → Edge screenshot ───────────────────────
+            try:
+                print(f"  [Slide {i+1}/{n}] Step 2 — Generating HTML infographic with Gemini...")
+                html = self._generate_slide_html_with_gemini(slide, topic, expanded, i, n)
+                print(f"  [Slide {i+1}/{n}] Step 3 — Screenshotting HTML with Edge headless...")
+                img_path = self._screenshot_html_slide(html, img_filename)
+            except Exception as exc:
+                print(f"  [WARN] HTML/Edge path failed ({type(exc).__name__}). Trying Pollinations fallback...")
+
+            # ── Fallback: Pollinations.ai ─────────────────────────────────────
+            if img_path is None:
+                try:
+                    img_prompt = self._build_asg_infographic_prompt(slide, topic, expanded, i, n)
+                    img_path = self._generate_slide_image_ai(img_prompt, img_filename)
+                except Exception as exc2:
+                    print(f"  [ERROR] All methods failed for slide {i+1} ({exc2}). Skipping.")
+                    continue
+
+            slide_paths.append(img_path)
+
+        if not slide_paths:
+            raise RuntimeError("All slide images failed to generate.")
+
+        # ── Assemble into PDF (images are the slides — nothing added on top) ──
+        pdf = FPDF(unit="mm", format=(210, 210))
+        for sp in slide_paths:
+            pdf.add_page()
+            pdf.image(sp, x=0, y=0, w=210, h=210)
+
+        out_path = self._out / filename
+        pdf.output(str(out_path))
+
+        for sp in slide_paths:
+            Path(sp).unlink(missing_ok=True)
+
+        print(f"  AI infographic carousel saved: {out_path}")
+        return str(out_path)
+
+    def _generate_slide_html_with_gemini(
+        self,
+        slide: dict,
+        topic: str,
+        expanded_content: str,
+        slide_idx: int,
+        total_slides: int,
+    ) -> str:
+        """
+        Use Gemini to generate a complete self-contained HTML/CSS infographic slide.
+        Design target: white background, dark navy headers, numbered sections,
+        flow arrows — matching ASG Clinical Platform / Azure Architecture style.
+        """
+        from google.genai import types
+
+        title    = slide.get("title", topic)
+        layout   = slide.get("layout", "split-left")
+        key_stat = slide.get("key_stat", "")
+        content  = expanded_content[:1200]
+
+        layout_instructions = {
+            "cover": (
+                f'COVER SLIDE — Topic: "{title}"\n'
+                "- Full-width dark navy header (height:90px) with large bold white title\n"
+                "- Below header: 3-4 concept boxes in a horizontal row\n"
+                "- Each box: navy top bar (40px) with emoji icon + label, white body with 2-3 bullet lines\n"
+                "- LinkedIn blue (#0077B5) horizontal accent line below header\n"
+                '- Bottom strip: "Swipe to explore →" in LinkedIn blue\n'
+            ),
+            "stat-callout": (
+                f'METRICS SLIDE — Title: "{title}"\n'
+                f'Key Stat to highlight prominently: "{key_stat}"\n'
+                "- Full-width dark navy header (height:80px) with slide title in white\n"
+                f'- Center: large bordered callout box with "{key_stat}" in huge navy bold '
+                "text (font-size:96px+), labelled 'Key Metric' below\n"
+                "- Below callout: 3 KPI tiles side-by-side, each with a navy header + white body\n"
+                "- Supporting bullet points at the bottom\n"
+            ),
+            "cta": (
+                f'CALL-TO-ACTION SLIDE — Title: "{title}"\n'
+                "- Full-width dark navy header (height:80px) with slide title in white\n"
+                "- Large motivational heading and sub-text in the center\n"
+                '- Prominent rounded navy button: "Follow for more →"\n'
+                "- CSS-drawn upward-trending arrow graphic on the right\n"
+            ),
+        }.get(layout, (
+            f'CONTENT SLIDE — Title: "{title}"\n'
+            "- Full-width dark navy header bar (height:80px) with white title text\n"
+            "- Main area split into TWO panels with a thin gray vertical divider:\n"
+            "  LEFT PANEL (48% width):\n"
+            f'    • If stat available ("{key_stat}"): bordered stat box with stat in '
+            "large bold navy text at top\n"
+            "    • 3-4 bullet points with filled navy circle bullets (●)\n"
+            "  RIGHT PANEL (48% width):\n"
+            "    • 3 numbered step cards stacked vertically\n"
+            "    • Each card: navy header strip with step number (01/02/03) + step title in white\n"
+            "    • White card body with brief 1-2 line description\n"
+            "    • Downward arrow (▼) between each card, centered, in navy\n"
+        ))
+
+        system = (
+            "You are an expert HTML/CSS infographic designer for corporate presentations.\n"
+            "Generate a COMPLETE, self-contained HTML file for a 1080×1080px LinkedIn carousel slide.\n\n"
+            "STRICT RULES:\n"
+            "1. Root div: width:1080px; height:1080px; overflow:hidden; box-sizing:border-box\n"
+            "2. White background (#FFFFFF) for the page body and content panels\n"
+            "3. Dark navy (#0D1F59) for ALL header bars, section headers, numbered badges\n"
+            "4. Accent blue (#0077B5) for highlights, bullet dots, arrows, borders\n"
+            "5. Font: 'Segoe UI', Arial, sans-serif — NO external fonts\n"
+            "6. All CSS in a single <style> block — NO external stylesheets\n"
+            "7. NO JavaScript. NO external images. NO SVG from URLs.\n"
+            "8. Use emoji for icons (📊 ⚙️ ✅ 🔹 📈 💡 🎯 etc.) — no <img> tags\n"
+            "9. All text clearly readable: min font-size 15px, dark text on white, white on navy\n"
+            "10. Return ONLY the raw HTML — no markdown fences, no explanation\n"
+        )
+
+        user_msg = (
+            f"Slide {slide_idx + 1} of {total_slides}.\n\n"
+            f"Layout spec:\n{layout_instructions}\n\n"
+            f"Content to visualise:\n{content}\n\n"
+            "Generate the complete 1080×1080 HTML infographic. "
+            "Make it look like a polished McKinsey/ASG consulting slide. "
+            "Every element must fit within the 1080×1080 box."
+        )
+
+        import re as _re
+        import time as _time
+
+        for attempt in range(3):
+            try:
+                resp = self._gemini_client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=user_msg,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system,
+                        temperature=0.3,
+                    ),
+                )
+                html = resp.text.strip()
+                if html.startswith("```"):
+                    lines = html.splitlines()
+                    lines = lines[1:]
+                    if lines and lines[-1].strip().startswith("```"):
+                        lines = lines[:-1]
+                    html = "\n".join(lines)
+                print(f"    Gemini HTML generated ({len(html)} chars).")
+                return html.strip()
+            except Exception as exc:
+                retryable = "429" in str(exc) or "503" in str(exc) or "UNAVAILABLE" in str(exc)
+                if attempt < 2 and retryable:
+                    m = _re.search(r'retry\s*in\s*([\d.]+)s', str(exc))
+                    wait = int(float(m.group(1))) + 5 if m else 30
+                    print(f"    Gemini busy ({type(exc).__name__}). Waiting {wait}s (attempt {attempt + 2}/3)...")
+                    _time.sleep(wait)
+                else:
+                    print(f"    Gemini HTML failed ({type(exc).__name__}). Using local renderer.")
+                    return self._generate_slide_html_local(slide, topic, slide_idx, total_slides)
+
+    def _generate_slide_html_local(
+        self,
+        slide: dict,
+        topic: str,
+        slide_idx: int,
+        total_slides: int,
+    ) -> str:
+        """
+        Generate a professional ASG-style infographic HTML slide entirely in Python
+        — no API call required.  Used when Gemini is unavailable/rate-limited.
+        White background, dark navy headers, numbered step cards, readable text.
+        """
+        import re
+        import html as _h
+
+        title     = _h.escape(slide.get("title", topic))
+        body      = slide.get("body", "")
+        key_stat  = _h.escape(slide.get("key_stat", ""))
+        layout    = slide.get("layout", "split-left")
+        tag       = _h.escape("#" + self._ascii_tag(topic))
+        num_label = f"{slide_idx + 1}&nbsp;/&nbsp;{total_slides}"
+
+        # Parse bullet sentences from body
+        sentences = [
+            _h.escape(s.strip())
+            for s in re.split(r'[.;]+', body)
+            if len(s.strip()) > 8
+        ]
+
+        # ── COVER ────────────────────────────────────────────────────────────
+        if layout == "cover":
+            sub = _h.escape(body[:260]) if body else ""
+            boxes = "".join(
+                f'<div class="box"><div class="bi">{ic}</div>'
+                f'<div class="bt">{s[:70]}</div></div>'
+                for ic, s in zip(["&#9881;", "&#128200;", "&#127919;", "&#128161;"], sentences[:4])
+            )
+            return (
+                "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>"
+                "*{box-sizing:border-box;margin:0;padding:0}"
+                "body{width:1080px;height:1080px;overflow:hidden;font-family:'Segoe UI',Arial,sans-serif}"
+                ".wrap{width:100%;height:100%;background:linear-gradient(155deg,#0D1F59 0%,#1a3a8a 55%,#0a2246 100%);display:flex;flex-direction:column}"
+                ".bar{height:6px;background:#0077B5;flex-shrink:0}"
+                ".main{flex:1;padding:52px 64px;display:flex;flex-direction:column;justify-content:center}"
+                ".top{display:flex;justify-content:space-between;align-items:center;margin-bottom:28px}"
+                ".tag{background:#0077B5;color:#fff;font-size:18px;font-weight:700;padding:8px 22px;border-radius:22px}"
+                ".num{color:rgba(255,255,255,.4);font-size:15px}"
+                "h1{color:#fff;font-size:62px;font-weight:900;line-height:1.15;max-width:760px;margin-bottom:20px}"
+                ".sub{color:rgba(255,255,255,.72);font-size:20px;line-height:1.55;max-width:720px;margin-bottom:38px}"
+                ".boxes{display:flex;gap:16px;margin-bottom:34px}"
+                ".box{flex:1;background:rgba(255,255,255,.09);border:1px solid rgba(255,255,255,.18);border-radius:12px;padding:18px 14px}"
+                ".bi{font-size:26px;margin-bottom:8px}"
+                ".bt{color:rgba(255,255,255,.84);font-size:14px;line-height:1.45;font-weight:500}"
+                ".swipe{color:#0077B5;font-size:18px;font-weight:700}"
+                f"</style></head><body><div class=\"wrap\"><div class=\"bar\"></div>"
+                f"<div class=\"main\"><div class=\"top\"><span class=\"tag\">{tag}</span>"
+                f"<span class=\"num\">{num_label}</span></div>"
+                f"<h1>{title}</h1><p class=\"sub\">{sub}</p>"
+                f"<div class=\"boxes\">{boxes}</div>"
+                "<p class=\"swipe\">Swipe to explore &rarr;</p>"
+                "</div><div class=\"bar\"></div></div></body></html>"
+            )
+
+        # ── CTA ──────────────────────────────────────────────────────────────
+        elif layout == "cta":
+            body_esc = _h.escape(body[:300]) if body else ""
+            return (
+                "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>"
+                "*{box-sizing:border-box;margin:0;padding:0}"
+                "body{width:1080px;height:1080px;overflow:hidden;font-family:'Segoe UI',Arial,sans-serif}"
+                ".wrap{width:100%;height:100%;background:linear-gradient(155deg,#0D1F59 0%,#1a3a8a 55%,#0a2246 100%);display:flex;flex-direction:column}"
+                ".bar{height:6px;background:#0077B5;flex-shrink:0}"
+                ".main{flex:1;padding:72px;display:flex;flex-direction:column;justify-content:center}"
+                ".num{color:rgba(255,255,255,.35);font-size:15px;margin-bottom:20px}"
+                "h1{color:#fff;font-size:58px;font-weight:900;line-height:1.18;max-width:880px;margin-bottom:16px}"
+                ".div{width:110px;height:6px;background:#0077B5;border-radius:3px;margin:20px 0 28px}"
+                ".sub{color:rgba(255,255,255,.70);font-size:23px;line-height:1.55;max-width:740px;margin-bottom:56px}"
+                ".btn{background:#0077B5;color:#fff;font-size:26px;font-weight:700;padding:22px 54px;border-radius:40px;display:inline-block}"
+                f"</style></head><body><div class=\"wrap\"><div class=\"bar\"></div>"
+                f"<div class=\"main\"><div class=\"num\">{num_label}</div>"
+                f"<h1>{title}</h1><div class=\"div\"></div>"
+                f"<p class=\"sub\">{body_esc}</p>"
+                "<div class=\"btn\">Follow for more &rarr;</div>"
+                "</div><div class=\"bar\"></div></div></body></html>"
+            )
+
+        # ── STAT CALLOUT ──────────────────────────────────────────────────────
+        elif layout == "stat-callout":
+            stat_box = (
+                f'<div class="sbox"><div class="snum">{key_stat}</div>'
+                '<div class="slbl">Key Metric</div></div>'
+            ) if key_stat else ""
+            bullets = "".join(
+                f'<div class="bl"><span class="dot">&#9679;</span><span>{s[:140]}</span></div>'
+                for s in sentences[:3]
+            )
+            return (
+                "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>"
+                "*{box-sizing:border-box;margin:0;padding:0}"
+                "body{width:1080px;height:1080px;overflow:hidden;font-family:'Segoe UI',Arial,sans-serif;background:#fff}"
+                ".hdr{background:#0D1F59;height:88px;display:flex;align-items:center;padding:0 36px;border-bottom:5px solid #0077B5}"
+                ".hdr h1{color:#fff;font-size:30px;font-weight:700;flex:1}"
+                ".hdr .num{color:rgba(255,255,255,.45);font-size:15px}"
+                ".body{padding:48px 60px;display:flex;flex-direction:column;align-items:center}"
+                ".sbox{border:3px solid #0077B5;border-radius:20px;padding:36px 80px;text-align:center;margin-bottom:40px;min-width:500px}"
+                ".snum{font-size:110px;font-weight:900;color:#0D1F59;line-height:1}"
+                ".slbl{font-size:19px;color:#666;margin-top:8px;font-weight:600;text-transform:uppercase;letter-spacing:1px}"
+                ".bls{width:100%;max-width:840px}"
+                ".bl{display:flex;align-items:flex-start;margin-bottom:18px;font-size:19px;color:#2a2a4a;line-height:1.5}"
+                ".dot{color:#0077B5;font-size:11px;margin-right:16px;margin-top:5px;flex-shrink:0}"
+                f"</style></head><body>"
+                f"<div class=\"hdr\"><h1>{title}</h1><span class=\"num\">{num_label}</span></div>"
+                f"<div class=\"body\">{stat_box}<div class=\"bls\">{bullets}</div></div>"
+                "</body></html>"
+            )
+
+        # ── SPLIT-LEFT (default content slide) ────────────────────────────────
+        else:
+            stat_html = (
+                f'<div class="sbox">'
+                f'<div class="snum">{key_stat}</div>'
+                '<div class="slbl">Key Metric</div></div>'
+            ) if key_stat else ""
+
+            bullets_html = "".join(
+                f'<div class="bl"><span class="dot">&#9679;</span><span>{s[:110]}</span></div>'
+                for s in sentences[:4]
+            )
+
+            step_titles = []
+            for s in sentences[:3]:
+                words = s.split()
+                step_titles.append((" ".join(words[:5]) + "&hellip;") if len(words) > 5 else s)
+            while len(step_titles) < 3:
+                step_titles.append(f"Step {len(step_titles) + 1}")
+
+            step_descs = (sentences[1:4] + ["", "", ""])[:3]
+
+            steps_html = ""
+            for j in range(3):
+                steps_html += (
+                    f'<div class="card">'
+                    f'<div class="chdr"><span class="cnum">0{j+1}</span>'
+                    f'<span class="ctitle">{step_titles[j]}</span></div>'
+                    f'<div class="cbody">{step_descs[j][:110]}</div>'
+                    f'</div>'
+                )
+                if j < 2:
+                    steps_html += '<div class="arr">&#9660;</div>'
+
+            return (
+                "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>"
+                "*{box-sizing:border-box;margin:0;padding:0}"
+                "body{width:1080px;height:1080px;overflow:hidden;font-family:'Segoe UI',Arial,sans-serif;background:#fff}"
+                ".hdr{background:#0D1F59;height:88px;display:flex;align-items:center;padding:0 36px;border-bottom:5px solid #0077B5}"
+                ".badge{background:#0077B5;color:#fff;font-size:17px;font-weight:700;width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;margin-right:16px;flex-shrink:0}"
+                ".hdr h1{color:#fff;font-size:27px;font-weight:700;flex:1}"
+                ".hdr .num{color:rgba(255,255,255,.45);font-size:15px}"
+                ".panels{display:flex;height:992px}"
+                ".left{width:50%;padding:30px 30px 30px 40px;border-right:2px solid #e0e8f5;overflow:hidden}"
+                ".right{width:50%;padding:30px 36px 30px 30px;display:flex;flex-direction:column;overflow:hidden}"
+                ".sbox{border:2px solid #0077B5;border-radius:14px;padding:16px 20px;margin-bottom:20px;background:#f0f5ff;display:flex;align-items:center;gap:18px}"
+                ".snum{font-size:50px;font-weight:900;color:#0D1F59;line-height:1;white-space:nowrap}"
+                ".slbl{font-size:15px;color:#555;font-weight:600;line-height:1.3}"
+                ".bl{display:flex;align-items:flex-start;margin-bottom:13px;font-size:17px;color:#2a2a4a;line-height:1.5}"
+                ".dot{color:#0077B5;font-size:10px;margin-right:12px;margin-top:4px;flex-shrink:0}"
+                ".card{background:#fff;border:1px solid #dde5f5;border-radius:10px;overflow:hidden;margin-bottom:6px}"
+                ".chdr{background:#0D1F59;padding:11px 16px;display:flex;align-items:center;gap:12px}"
+                ".cnum{background:#0077B5;color:#fff;font-size:14px;font-weight:700;width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0}"
+                ".ctitle{color:#fff;font-size:15px;font-weight:700}"
+                ".cbody{padding:11px 16px;color:#333;font-size:15px;line-height:1.5}"
+                ".arr{text-align:center;color:#0077B5;font-size:20px;line-height:1;margin:3px 0}"
+                f"</style></head><body>"
+                f"<div class=\"hdr\"><div class=\"badge\">{slide_idx+1}</div>"
+                f"<h1>{title}</h1><span class=\"num\">{num_label}</span></div>"
+                f"<div class=\"panels\">"
+                f"<div class=\"left\">{stat_html}{bullets_html}</div>"
+                f"<div class=\"right\">{steps_html}</div>"
+                "</div></body></html>"
+            )
+
+    def _screenshot_html_slide(self, html_content: str, filename: str) -> str:
+        """
+        Save HTML to a temp file then capture a 1080×1080 screenshot using
+        Microsoft Edge (or Chrome) in headless mode.
+        Returns the path of the saved PNG.
+        """
+        import subprocess
+
+        tmp_html = self._out / f"_tmp_{filename}.html"
+        tmp_html.write_text(html_content, encoding="utf-8")
+        out_path = self._out / filename
+
+        browser_candidates = [
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        ]
+        browser = next((p for p in browser_candidates if Path(p).exists()), None)
+        if not browser:
+            tmp_html.unlink(missing_ok=True)
+            raise RuntimeError("No headless browser (Edge/Chrome) found.")
+
+        file_uri = tmp_html.resolve().as_uri()
+        cmd = [
+            browser,
+            "--headless",
+            "--disable-gpu",
+            "--no-sandbox",
+            "--disable-software-rasterizer",
+            "--force-device-scale-factor=1",
+            "--window-size=1080,1080",
+            f"--screenshot={str(out_path.resolve())}",
+            file_uri,
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, timeout=45)
+        tmp_html.unlink(missing_ok=True)
+
+        if not out_path.exists() or out_path.stat().st_size < 2000:
+            raise RuntimeError(
+                f"Edge screenshot failed. "
+                f"stderr: {result.stderr.decode(errors='replace')[:400]}"
+            )
+        print(f"    HTML slide rendered by Edge headless ✓")
+        return str(out_path)
+
+    def _expand_all_slides_batch(
+        self,
+        slides: List[dict],
+        topic: str,
+        post_hook: str = "",
+    ) -> dict:
+        """
+        Single Gemini call that returns expanded content (200-300 words) for ALL
+        slides at once.  Returns {slide_index: content_string}.  Falls back to
+        empty dict so callers use the original slide brief instead.
+        """
+        try:
+            from google.genai import types
+            import json as _json
+
+            specs = [
+                {
+                    "idx":      i,
+                    "title":    s.get("title", topic),
+                    "body":     s.get("body", "")[:200],
+                    "key_stat": s.get("key_stat", ""),
+                    "layout":   s.get("layout", "split-left"),
+                }
+                for i, s in enumerate(slides)
+            ]
+
+            user_msg = (
+                f"Topic: {topic}\nPost hook: {post_hook or 'N/A'}\n\n"
+                "Expand each slide into 200-300 words of structured professional content.\n"
+                "For each slide include: 1 main heading, 2-3 sub-sections with sub-headings, "
+                "concise bullet points, and any key stat prominently.\n\n"
+                f"Slides:\n{_json.dumps(specs, indent=2)}\n\n"
+                f"Return ONLY a JSON object mapping each slide index (as a string) to its "
+                f"expanded content string.  Example: {{\"0\": \"# Title\\n\\nContent...\", \"1\": \"...\"}}"
+            )
+
+            resp = self._gemini_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=user_msg,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.5,
+                ),
+            )
+            raw = resp.text.strip()
+            if raw.startswith("```"):
+                raw = raw.split("```", 2)[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+                raw = raw.rsplit("```", 1)[0]
+            data = _json.loads(raw)
+            result = {}
+            for k, v in data.items():
+                try:
+                    result[int(k)] = str(v)
+                except (ValueError, TypeError):
+                    pass
+            print(f"  Batch content generated for {len(result)}/{len(slides)} slides.")
+            return result
+        except Exception as exc:
+            print(f"  [WARN] Batch content expansion failed ({exc}). Using slide briefs.")
+            return {}
+
+    def _expand_slide_content_with_llm(
+        self,
+        slide: dict,
+        topic: str,
+        post_hook: str = "",
+    ) -> str:
+        """
+        Step 1: Use Gemini LLM to expand one slide into 300-400 words of structured
+        content (heading + sub-sections + bullets). This content informs the image prompt.
+        """
+        try:
+            from google.genai import types
+
+            title    = slide.get("title", topic)
+            body     = slide.get("body", "")
+            key_stat = slide.get("key_stat", "")
+            layout   = slide.get("layout", "split-left")
+
+            layout_hint = {
+                "cover": (
+                    "This is the COVER slide. Write a compelling introduction overview "
+                    "that sets the stage for the full carousel."
+                ),
+                "stat-callout": (
+                    f"This is a METRICS slide. Feature the key statistic prominently: '{key_stat}'. "
+                    "Back it up with context, trend data, and 2-3 supporting data points."
+                ),
+                "cta": (
+                    "This is the CALL-TO-ACTION slide. Write an engaging closing that "
+                    "motivates readers to follow, share, or comment."
+                ),
+            }.get(layout, (
+                "This is a CONTENT slide. Structure with 3 numbered steps or clear "
+                "sub-sections that professionals can act on immediately."
+            ))
+
+            user_msg = (
+                f"Topic: {topic}\n"
+                f"Slide title: {title}\n"
+                f"Brief content: {body}\n"
+                f"Key statistic: {key_stat or 'N/A'}\n"
+                f"Post hook: {post_hook or 'N/A'}\n\n"
+                f"{layout_hint}\n\n"
+                "Write a professional 300-400 word infographic content piece.\n"
+                "Structure:\n"
+                "- 1 main heading\n"
+                "- 2-3 sub-sections each with a sub-heading\n"
+                "- Concise bullet points or numbered steps under each section\n"
+                "- Include the key stat if provided\n"
+                "Be concise, authoritative, and suitable for a LinkedIn professional audience."
+            )
+
+            resp = self._gemini_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=user_msg,
+                config=types.GenerateContentConfig(temperature=0.6),
+            )
+            content = resp.text.strip()
+            print(f"    Content generated ({len(content.split())} words).")
+            return content
+        except Exception as exc:
+            print(f"  [WARN] Content expansion failed ({exc}). Using slide brief.")
+            return f"# {slide.get('title', topic)}\n\n{slide.get('body', '')}"
+
+    def _build_asg_infographic_prompt(
+        self,
+        slide: dict,
+        topic: str,
+        expanded_content: str,
+        slide_idx: int,
+        total_slides: int,
+    ) -> str:
+        """
+        Step 2: Build a detailed image prompt for a professional white-background
+        infographic diagram in the style of ASG Clinical Platform / Azure Architecture:
+        numbered sections, dark navy headers, flow arrows, clean flat icons, white bg.
+        """
+        title    = slide.get("title", topic)
+        layout   = slide.get("layout", "split-left")
+        key_stat = slide.get("key_stat", "")
+
+        # Trim expanded content to key context for the prompt
+        content_ctx = " ".join(expanded_content.split()[:100])
+
+        base_style = (
+            "Professional corporate infographic diagram, pure white background (#FFFFFF). "
+            "Consulting firm slide deck quality — McKinsey / Accenture / Azure Architecture Center style. "
+            "Dark navy blue (#0D1F59) header bars and section title labels. "
+            "Numbered boxes with colored navy/blue headers and white content panels. "
+            "Flow arrows connecting elements. Flat design icons. "
+            "Clear numbered sections (01, 02, 03). "
+            "Clean sans-serif typography. White background throughout — no dark backgrounds. "
+            "Vector illustration style, no photography, no people. "
+        )
+
+        layout_spec = {
+            "cover": (
+                f"Cover infographic slide for the topic: '{title}'. "
+                "Full-width dark navy header bar at top with large bold white title. "
+                "Below header: 3-4 horizontally arranged concept boxes with icons, "
+                "each with a colored header (navy/blue) and white body. "
+                "Arrows connecting the concept boxes left to right. "
+                "Professional overview diagram layout."
+            ),
+            "stat-callout": (
+                f"Metrics infographic with '{key_stat}' as the central highlighted KPI. "
+                "Large bold metric number inside a prominent bordered callout box. "
+                "3 supporting KPI tiles arranged in a row below the main metric. "
+                "Bar chart or trend line as a secondary visual element. "
+                "Full-width dark navy header bar at top with slide title."
+            ),
+            "cta": (
+                "Professional call-to-action closing infographic. "
+                "Upward-trending growth arrows and chart element on the right side. "
+                "Clean navy and blue color accent sections. "
+                "Professional closing slide with clear visual emphasis."
+            ),
+        }.get(layout, (
+            f"Multi-section process flow infographic about '{title}'. "
+            "Full-width dark navy header bar at top containing the slide title in white. "
+            "LEFT PANEL (50% width): information panel with a key stats box at top "
+            "and 3-4 bullet point lines below. "
+            "RIGHT PANEL (50% width): 3 numbered vertical step boxes, each with a "
+            "dark navy header strip containing the step number (01, 02, 03) and step title, "
+            "and white body content below. Downward arrows between each step box. "
+            "Thin vertical gray divider line between left and right panels."
+        ))
+
+        return (
+            f"{base_style}"
+            f"{layout_spec} "
+            f"Content context: {content_ctx}. "
+            "1080x1080 square format. "
+            "Sharp edges, high resolution, professional LinkedIn publication quality."
+        )
+
+    def _generate_slide_image_ai(self, prompt: str, filename: str) -> str:
+        """
+        Step 3: Generate the slide image using HuggingFace FLUX.1-schnell (primary)
+        or Pollinations.ai FLUX model (fallback). No Pillow rendering — pure AI images.
+        """
+        from config.settings import get_settings
+        settings = get_settings()
+        token = settings.hf_api_token
+
+        # ── Primary: HuggingFace FLUX.1-schnell ──────────────────────────────
+        if token:
+            try:
+                api_url = (
+                    "https://router.huggingface.co/hf-inference/models/"
+                    "black-forest-labs/FLUX.1-schnell"
+                )
+                headers = {"Authorization": f"Bearer {token}"}
+                payload = {
+                    "inputs": prompt,
+                    "parameters": {"width": 1024, "height": 1024},
+                }
+                resp = requests.post(api_url, headers=headers, json=payload, timeout=120)
+                resp.raise_for_status()
+                out_path = self._out / filename
+                out_path.write_bytes(resp.content)
+                print(f"    Image generated via FLUX.1-schnell (HuggingFace).")
+                return str(out_path)
+            except Exception as exc:
+                print(f"  [WARN] HuggingFace FLUX failed ({exc}), trying Pollinations...")
+
+        # ── Fallback: Pollinations.ai FLUX model ─────────────────────────────
+        try:
+            encoded = urllib.parse.quote(prompt, safe="")
+            seed    = abs(hash(prompt)) % 99999
+            url     = (
+                f"https://image.pollinations.ai/prompt/{encoded}"
+                f"?width=1024&height=1024&model=flux&seed={seed}&nologo=true"
+            )
+            resp = requests.get(url, timeout=120)
+            resp.raise_for_status()
+            out_path = self._out / filename
+            out_path.write_bytes(resp.content)
+            print(f"    Image generated via Pollinations.ai.")
+            return str(out_path)
+        except Exception as exc:
+            print(f"  [ERROR] All image providers failed for this slide ({exc}).")
+            raise
+
 
     # ── Infographic carousel (AI-generated images + Pillow text overlay) ────────
 
