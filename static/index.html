@@ -114,20 +114,6 @@
           </div>
         </div>
 
-        <!-- Carousel infographic mode toggle (shown only when Carousel is selected) -->
-        <div id="carouselOptionsRow" class="hidden">
-          <label class="flex items-start gap-3 p-3 rounded-lg border border-slate-200 bg-slate-50 cursor-pointer hover:border-[#0077B5] transition">
-            <input type="checkbox" id="infographicMode" class="mt-0.5 h-4 w-4 accent-[#0077B5]" />
-            <div>
-              <div class="text-sm font-medium text-slate-700">✨ Rich Infographic Slides</div>
-              <div class="text-xs text-slate-400 mt-0.5">
-                Generate a unique AI infographic image per slide (architecture diagrams, stat callouts, split-panel layout).
-                Uses 6 AI image calls — takes ~2 min but produces premium results.
-              </div>
-            </div>
-          </label>
-        </div>
-
         <!-- Submit -->
         <button
           type="submit"
@@ -270,20 +256,7 @@
       update();
     });
 
-    // ── Show/hide carousel infographic options ─────────────────────────────
-    function updateCarouselOptions() {
-      const fmt = document.querySelector('input[name="postFormat"]:checked');
-      const row = document.getElementById('carouselOptionsRow');
-      if (fmt && fmt.value === 'carousel') {
-        row.classList.remove('hidden');
-      } else {
-        row.classList.add('hidden');
-        document.getElementById('infographicMode').checked = false;
-      }
-    }
-    document.querySelectorAll('input[name="postFormat"]').forEach(r => {
-      r.addEventListener('change', updateCarouselOptions);
-    });
+
 
     // ── Render pipeline steps ──────────────────────────────────────────────
     function renderSteps(format) {
@@ -355,8 +328,7 @@
       const topic = document.getElementById('topic').value.trim();
       const userContext = document.getElementById('userContext').value.trim();
       const postFormat = document.querySelector('input[name="postFormat"]:checked').value;
-      const infographicMode = document.getElementById('infographicMode').checked;
-      const carouselImageMode = (postFormat === 'carousel' && infographicMode) ? 'per_slide' : 'shared';
+      const carouselImageMode = 'per_slide';
       const errorEl = document.getElementById('formError');
 
       errorEl.classList.add('hidden');

@@ -62,6 +62,208 @@ class DesignAgent:
             return self._generate_image_pollinations(image_prompt, filename)
         return self._generate_image_openai(image_prompt, filename)
 
+    def generate_infographic_image(
+        self,
+        topic: str,
+        hook_line: str = "",
+        image_prompt: str = "",
+        post_text: str = "",
+        filename: str = "post_image.png",
+    ) -> str:
+        """
+        Generate a 1080×1080 standalone infographic PNG for the IMAGE post format.
+        Dedicated layout: navy header → hook quote banner → 3 content sections → footer.
+        NO carousel references. Accommodates the full post content.
+        Fallback chain: Gemini HTML → local HTML → Edge → Pillow.
+        """
+        print("  Generating standalone infographic image (HTML → Edge headless)...")
+
+        # Step 1: Try Gemini for AI-quality HTML
+        html = None
+        if hasattr(self, "_gemini_client"):
+            try:
+                html = self._generate_standalone_image_html_with_gemini(
+                    topic, hook_line, post_text
+                )
+            except Exception as exc:
+                print(f"  [WARN] Gemini image HTML failed ({exc}). Using local renderer.")
+
+        if html is None:
+            html = self._generate_image_html_local(topic, hook_line, post_text)
+
+        # Step 2: Screenshot with Edge
+        try:
+            return self._screenshot_html(html, filename, 1080, 1080)
+        except Exception as exc:
+            print(f"  [WARN] Edge screenshot failed ({exc}). Retrying with local HTML.")
+
+        # Step 3: Local HTML + Edge retry (in case Gemini HTML was malformed)
+        try:
+            html_local = self._generate_image_html_local(topic, hook_line, post_text)
+            return self._screenshot_html(html_local, filename, 1080, 1080)
+        except Exception as exc2:
+            print(f"  [WARN] Local HTML also failed ({exc2}). Using Pillow fallback.")
+            return self._generate_image_pillow(image_prompt or topic, filename)
+
+    def _generate_standalone_image_html_with_gemini(
+        self,
+        topic: str,
+        hook_line: str = "",
+        post_text: str = "",
+    ) -> str:
+        """
+        Ask Gemini to generate a 1080×1080 standalone infographic HTML.
+        Dedicated image layout — NOT a carousel slide.
+        """
+        from google.genai import types
+        import re as _re
+        import time as _time
+
+        content = (post_text or hook_line or topic)[:1400]
+
+        system = (
+            "You are an expert HTML/CSS infographic designer.\n"
+            "Generate a COMPLETE self-contained HTML for a 1080\u00d71080px standalone LinkedIn image.\n\n"
+            "LAYOUT (flex column filling exactly 1080px height — NO scrollbars, NO gaps):\n"
+            "1. HEADER (height:90px, flex-shrink:0): dark navy (#0D1F59), white title left, "
+            "   #hashtag badge right in LinkedIn blue (#0077B5).\n"
+            "2. HOOK BANNER (flex-shrink:0): light blue (#eef4ff), left border 6px solid #0077B5, "
+            "   italic quote (font-size:20px, padding:22px 44px).\n"
+            "3. CONTENT AREA (flex:1, overflow:hidden, padding:14px 44px, gap:12px): "
+            "   3 sections each flex:1 — emoji icon + ALL-CAPS bold heading + body text. "
+            "   Left border 4px solid #0D1F59, border-radius:12px.\n"
+            "4. FOOTER (height:46px, flex-shrink:0): dark navy, hashtag left #0077B5, "
+            "   'AI Infographic' right faded white.\n\n"
+            "STRICT CSS RULES:\n"
+            "- html, body { width:1080px; height:1080px; overflow:hidden; margin:0; padding:0 }\n"
+            "- body { display:flex; flex-direction:column; background:#fff }\n"
+            "- ::-webkit-scrollbar { display:none }\n"
+            "- Footer is the LAST flex child — NOT position:absolute\n"
+            "- Font: 'Segoe UI', Arial, sans-serif. No external resources.\n"
+            "- NO 'Swipe to explore', NO slide numbers, NO carousel language.\n"
+            "- Return ONLY raw HTML, no markdown fences."
+        )
+
+        user_msg = (
+            f"Topic: {topic}\n"
+            f"Hook line: {hook_line}\n"
+            f"Full post content:\n{content}\n\n"
+            "Generate the complete 1080×1080 standalone infographic. "
+            "Extract 3 key insights from the content for the 3 sections. "
+            "Make it look like a polished, information-rich LinkedIn image post."
+        )
+
+        for attempt in range(3):
+            try:
+                resp = self._gemini_client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=user_msg,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system,
+                        temperature=0.3,
+                    ),
+                )
+                html = resp.text.strip()
+                if html.startswith("```"):
+                    lines = html.splitlines()
+                    lines = lines[1:]
+                    if lines and lines[-1].strip().startswith("```"):
+                        lines = lines[:-1]
+                    html = "\n".join(lines)
+                print(f"    Gemini standalone image HTML generated ({len(html)} chars).")
+                return html.strip()
+            except Exception as exc:
+                retryable = "429" in str(exc) or "503" in str(exc) or "UNAVAILABLE" in str(exc)
+                if attempt < 2 and retryable:
+                    import re as _re2
+                    import time as _time2
+                    m = _re2.search(r'retry\s*in\s*([\d.]+)s', str(exc))
+                    wait = int(float(m.group(1))) + 5 if m else 30
+                    print(f"    Gemini busy. Waiting {wait}s (attempt {attempt + 2}/3)...")
+                    _time2.sleep(wait)
+                else:
+                    raise
+
+    def _generate_image_html_local(
+        self,
+        topic: str,
+        hook_line: str = "",
+        post_text: str = "",
+    ) -> str:
+        """
+        Generate a 1080×1080 standalone infographic HTML entirely in Python.
+        Layout: navy header → hook quote banner → 3 content section cards → navy footer.
+        No carousel language. Accommodates full post content.
+        """
+        import re
+        import html as _h
+
+        title    = _h.escape(topic)
+        tag      = _h.escape("#" + self._ascii_tag(topic))
+        hook_esc = _h.escape(hook_line[:220]) if hook_line else _h.escape(topic)
+
+        # Extract up to 6 key sentences from post_text
+        raw_sentences = [
+            s.strip() for s in re.split(r'[.;\n]+', post_text or "")
+            if len(s.strip()) > 15
+        ]
+
+        section_labels = ["KEY INSIGHT", "WHAT THIS MEANS", "THE OPPORTUNITY"]
+        section_icons  = ["\U0001f4ca", "\u2699\ufe0f", "\U0001f3af"]
+
+        sections_html = ""
+        for i in range(3):
+            body = _h.escape(raw_sentences[i][:180]) if i < len(raw_sentences) else _h.escape(topic)
+            sections_html += (
+                f'<div class="sec">'
+                f'<div class="sec-ic">{section_icons[i]}</div>'
+                f'<div class="sec-ct">'
+                f'<div class="sec-hd">{section_labels[i]}</div>'
+                f'<div class="sec-bd">{body}</div>'
+                f'</div></div>'
+            )
+
+        return (
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>"
+            "*{box-sizing:border-box;margin:0;padding:0}"
+            "html{width:1080px;height:1080px;overflow:hidden}"
+            "body{width:1080px;height:1080px;overflow:hidden;"
+            "font-family:'Segoe UI',Arial,sans-serif;background:#fff;"
+            "display:flex;flex-direction:column}"
+            "::-webkit-scrollbar{display:none}"
+            ".hdr{background:#0D1F59;height:90px;flex-shrink:0;display:flex;align-items:center;"
+            "justify-content:space-between;padding:0 44px;border-bottom:5px solid #0077B5}"
+            ".hdr h1{color:#fff;font-size:27px;font-weight:800;line-height:1.2;max-width:740px}"
+            ".badge{background:#0077B5;color:#fff;font-size:14px;font-weight:700;"
+            "padding:7px 18px;border-radius:20px;white-space:nowrap;flex-shrink:0}"
+            ".hook{background:#eef4ff;padding:22px 44px;flex-shrink:0;"
+            "border-left:6px solid #0077B5}"
+            ".hook p{font-size:20px;font-style:italic;color:#1a2a5e;"
+            "line-height:1.5;font-weight:500;max-width:950px}"
+            ".content{flex:1;padding:14px 44px;display:flex;flex-direction:column;"
+            "gap:12px;overflow:hidden}"
+            ".sec{flex:1;display:flex;align-items:flex-start;gap:18px;padding:14px 20px;"
+            "background:#fff;border:1px solid #dde5f5;border-left:4px solid #0D1F59;"
+            "border-radius:12px;overflow:hidden}"
+            ".sec-ic{font-size:28px;flex-shrink:0;margin-top:2px}"
+            ".sec-ct{flex:1;overflow:hidden}"
+            ".sec-hd{font-size:13px;font-weight:800;color:#0D1F59;margin-bottom:6px;"
+            "text-transform:uppercase;letter-spacing:0.8px}"
+            ".sec-bd{font-size:15px;color:#2a2a3e;line-height:1.55}"
+            ".ftr{background:#0D1F59;height:46px;flex-shrink:0;display:flex;"
+            "align-items:center;justify-content:space-between;"
+            "padding:0 44px;border-top:3px solid #0077B5}"
+            ".ftr-tag{color:#0077B5;font-size:15px;font-weight:700}"
+            ".ftr-lbl{color:rgba(255,255,255,.35);font-size:13px}"
+            f"</style></head><body>"
+            f"<div class=\"hdr\"><h1>{title}</h1><span class=\"badge\">{tag}</span></div>"
+            f"<div class=\"hook\"><p>&ldquo;{hook_esc}&rdquo;</p></div>"
+            f"<div class=\"content\">{sections_html}</div>"
+            f"<div class=\"ftr\"><span class=\"ftr-tag\">{tag}</span>"
+            "<span class=\"ftr-lbl\">AI Infographic</span></div>"
+            "</body></html>"
+        )
+
     def _generate_image_gemini_imagen(self, image_prompt: str, filename: str) -> str:
         """
         Generate via Google Gemini Imagen 3 — produces high-quality infographic images
@@ -390,6 +592,103 @@ class DesignAgent:
         bg.convert("RGB").save(str(out_path), "PNG")
         Path(bg_path).unlink(missing_ok=True)
         return str(out_path)
+
+    def generate_infographic_flyer(
+        self,
+        headline: str,
+        subtitle: str,
+        topic: str,
+        body_text: str = "",
+        filename: str = "flyer.png",
+    ) -> str:
+        """
+        Generate a 1200×627 ASG-style landscape infographic PNG for the FLYER post format.
+        Uses HTML → Edge headless.  Fallback: Pillow.
+        """
+        print("  Generating infographic flyer (HTML → Edge headless, 1200×627)...")
+        html = self._generate_flyer_html_local(headline, subtitle, topic, body_text)
+        try:
+            return self._screenshot_html(html, filename, 1200, 627)
+        except Exception as exc:
+            print(f"  [WARN] Edge flyer screenshot failed ({exc}). Falling back to Pillow.")
+            return self._flyer_pillow_fallback(headline, subtitle, topic, filename, body_text)
+
+    def _generate_flyer_html_local(
+        self,
+        headline: str,
+        subtitle: str,
+        topic: str,
+        body_text: str = "",
+    ) -> str:
+        """
+        Generate a 1200×627 landscape HTML infographic (ASG style) for the flyer format.
+        Left panel (navy): headline + subtitle + hashtag.
+        Right panel (white): 3 key-point cards from body_text.
+        """
+        import re
+        import html as _h
+
+        hl = _h.escape(headline)
+        sub = _h.escape(subtitle)
+        tag = _h.escape("#" + self._ascii_tag(topic))
+        body_esc = _h.escape(body_text[:160]) if body_text else ""
+
+        sentences = [
+            _h.escape(s.strip())
+            for s in re.split(r'[.;\n]+', body_text)
+            if len(s.strip()) > 10
+        ][:3]
+        while len(sentences) < 3:
+            sentences.append("Key insight from the post")
+
+        icons = ["&#128200;", "&#9881;", "&#127919;"]
+        cards_html = ""
+        for i, (icon, sent) in enumerate(zip(icons, sentences)):
+            cards_html += (
+                f'<div class="card">'
+                f'<div class="chdr"><span class="cnum">{icon}</span>'
+                f'<span class="ctitle">Key Point {i + 1}</span></div>'
+                f'<div class="cbody">{sent[:140]}</div>'
+                f'</div>'
+            )
+
+        excerpt_html = f'<p class="excerpt">{body_esc}</p>' if body_esc else ""
+        return (
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>"
+            "*{box-sizing:border-box;margin:0;padding:0}"
+            "body{width:1200px;height:627px;overflow:hidden;font-family:'Segoe UI',Arial,sans-serif}"
+            ".wrap{display:flex;width:100%;height:100%}"
+            ".left{width:54%;background:linear-gradient(145deg,#0D1F59 0%,#1a3a8a 100%);"
+            "padding:48px 52px;display:flex;flex-direction:column;justify-content:center;position:relative}"
+            ".bar-top{position:absolute;top:0;left:0;right:0;height:6px;background:#0077B5}"
+            ".bar-bot{position:absolute;bottom:0;left:0;right:0;height:6px;background:#0077B5}"
+            ".tag{display:inline-block;background:#0077B5;color:#fff;font-size:15px;font-weight:700;"
+            "padding:6px 18px;border-radius:20px;margin-bottom:24px}"
+            "h1{color:#fff;font-size:44px;font-weight:900;line-height:1.2;margin-bottom:14px;max-width:520px}"
+            ".sub{color:rgba(255,255,255,.72);font-size:18px;line-height:1.55;max-width:480px;margin-bottom:20px}"
+            ".divider{width:70px;height:5px;background:#0077B5;border-radius:3px;margin-bottom:18px}"
+            ".excerpt{color:rgba(255,255,255,.55);font-size:15px;line-height:1.5;max-width:480px;"
+            "border-left:3px solid #0077B5;padding-left:14px}"
+            ".right{width:46%;background:#fff;padding:36px 40px;display:flex;flex-direction:column;"
+            "justify-content:center;gap:12px;border-left:4px solid #0077B5}"
+            ".right-title{font-size:17px;font-weight:700;color:#0D1F59;margin-bottom:4px}"
+            ".card{border:1px solid #dde5f5;border-radius:10px;overflow:hidden}"
+            ".chdr{background:#0D1F59;padding:10px 16px;display:flex;align-items:center;gap:10px}"
+            ".cnum{font-size:18px}"
+            ".ctitle{color:#fff;font-size:14px;font-weight:700}"
+            ".cbody{padding:10px 16px;color:#333;font-size:14px;line-height:1.45}"
+            f"</style></head><body><div class=\"wrap\">"
+            f"<div class=\"left\"><div class=\"bar-top\"></div>"
+            f"<span class=\"tag\">{tag}</span>"
+            f"<h1>{hl}</h1>"
+            f"<div class=\"divider\"></div>"
+            f"<p class=\"sub\">{sub}</p>"
+            f"{excerpt_html}"
+            f"<div class=\"bar-bot\"></div></div>"
+            f"<div class=\"right\"><p class=\"right-title\">Key Takeaways</p>"
+            f"{cards_html}</div>"
+            "</div></body></html>"
+        )
 
     def generate_carousel(
         self,
@@ -785,11 +1084,12 @@ class DesignAgent:
                 "</div></body></html>"
             )
 
-    def _screenshot_html_slide(self, html_content: str, filename: str) -> str:
+    def _screenshot_html(
+        self, html_content: str, filename: str, width: int = 1080, height: int = 1080
+    ) -> str:
         """
-        Save HTML to a temp file then capture a 1080×1080 screenshot using
-        Microsoft Edge (or Chrome) in headless mode.
-        Returns the path of the saved PNG.
+        Save HTML to a temp file then capture a screenshot using Edge/Chrome headless
+        at the given pixel dimensions.  Returns the path of the saved PNG.
         """
         import subprocess
 
@@ -816,7 +1116,7 @@ class DesignAgent:
             "--no-sandbox",
             "--disable-software-rasterizer",
             "--force-device-scale-factor=1",
-            "--window-size=1080,1080",
+            f"--window-size={width},{height}",
             f"--screenshot={str(out_path.resolve())}",
             file_uri,
         ]
@@ -829,8 +1129,12 @@ class DesignAgent:
                 f"Edge screenshot failed. "
                 f"stderr: {result.stderr.decode(errors='replace')[:400]}"
             )
-        print(f"    HTML slide rendered by Edge headless ✓")
+        print(f"    HTML rendered by Edge headless ({width}\u00d7{height}) \u2713")
         return str(out_path)
+
+    def _screenshot_html_slide(self, html_content: str, filename: str) -> str:
+        """1080\u00d71080 screenshot \u2014 delegates to _screenshot_html for carousel slides."""
+        return self._screenshot_html(html_content, filename, 1080, 1080)
 
     def _expand_all_slides_batch(
         self,

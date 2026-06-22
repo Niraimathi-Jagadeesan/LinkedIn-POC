@@ -147,19 +147,19 @@ def create_visual(state: AgentState) -> AgentState:
     agent = DesignAgent()
 
     if fmt == PostFormat.IMAGE:
-        print("\n[4/6] Generating image with FLUX.1-schnell...")
-        path = agent.generate_image(state["image_prompt"])
-        # Overlay the hook line so the image carries the post message
-        hook = (state.get("hook_line") or "").strip()
-        if hook:
-            path = agent.add_text_overlay(path, hook)
+        print("\n[4/6] Generating infographic image...")
+        path = agent.generate_infographic_image(
+            topic=state["topic"],
+            hook_line=(state.get("hook_line") or "").strip(),
+            image_prompt=state.get("image_prompt", ""),
+            post_text=state.get("generated_text", ""),
+        )
         return {**state, "image_path": path}
 
     if fmt == PostFormat.FLYER:
-        print("\n[4/6] Designing flyer graphic...")
-        # Pull the first sentence of the post as a key-insight excerpt
+        print("\n[4/6] Designing infographic flyer...")
         body_text = _first_sentence(state.get("generated_text", ""), max_chars=160)
-        path = agent.generate_flyer(
+        path = agent.generate_infographic_flyer(
             headline=state.get("flyer_headline") or state["topic"],
             subtitle=state.get("flyer_subtitle") or "",
             topic=state["topic"],
@@ -190,10 +190,9 @@ def create_visual(state: AgentState) -> AgentState:
             )
         # Use the post hook line on the carousel cover for immediate context
         post_hook = (state.get("hook_line") or _first_sentence(state.get("generated_text", ""), 120)).strip()
-        infographic_mode = (state.get("carousel_image_mode", "shared") == "per_slide")
         path = agent.generate_carousel(
             slides, state["topic"], post_hook=post_hook,
-            infographic_mode=infographic_mode,
+            infographic_mode=True,
         )
         return {**state, "carousel_path": path}
 
